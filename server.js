@@ -7,80 +7,72 @@ app.use(express.json());
 app.use(cors());
 
 // --- DATABASE CONNECTION ---
-// Alexsco: This connects to your specific MongoDB cluster
 const mongoURI = "mongodb+srv://BinaryOption:Alex4krist@cluster0.zgguzis.mongodb.net/TradingData?retryWrites=true&w=majority&appName=Cluster0";
 
 mongoose.connect(mongoURI)
-    .then(() => console.log("✅ Cloud Database Connected: TradingData"))
+    .then(() => console.log("✅ Cloud Database Connected"))
     .catch(err => console.error("❌ Database Connection Error:", err));
 
-// --- USER SCHEMA ---
+// --- SCHEMAS ---
+
+// User Schema (Includes Balance)
 const userSchema = new mongoose.Schema({
     name: { type: String, required: true },
     email: { type: String, unique: true, required: true },
     password: { type: String, required: true },
-    balance: { type: Number, default: 0.00 }, 
-    isVerified: { type: Boolean, default: false },
-    createdAt: { type: Date, default: Date.now }
+    balance: { type: Number, default: 0.00 }
 });
-
 const User = mongoose.model('User', userSchema);
+
+// Withdrawal Schema (The "Log" for the user)
+const withdrawalSchema = new mongoose.Schema({
+    email: String,
+    amount: Number,
+    wallet: String,
+    status: { type: String, default: "Pending" }, // Pending, Approved, or Rejected
+    date: { type: Date, default: Date.now }
+});
+const Withdrawal = mongoose.model('Withdrawal', withdrawalSchema);
 
 // --- ROUTES ---
 
-// 1. Status Route (Turns the light GREEN on your website)
-app.get('/status', (req, res) => {
-    res.json({ success: true, status: "online" });
-});
+app.get('/status', (req, res) => res.json({ success: true, status: "online" }));
 
-// 2. Home Route
-app.get('/', (req, res) => {
-    res.send("BinaryOption Terminal API is Running...");
-});
-
-// Registration Route
-app.post('/register', async (req, res) => {
-    try {
-        const { name, email, password } = req.body;
-        const existingUser = await User.findOne({ email });
-        if (existingUser) return res.status(400).json({ message: "Email already in use" });
-
-        const newUser = new User({ name, email, password });
-        await newUser.save();
-        res.status(201).json({ 
-            success: true, 
-            user: { name: newUser.name, email: newUser.email, balance: newUser.balance } 
-        });
-    } catch (error) {
-        res.status(500).json({ message: "Error creating account" });
-    }
-});
-
-// Login Route
+// Login Route (Now sends back the user's real balance)
 app.post('/login', async (req, res) => {
-    try {
-        const { email, password } = req.body;
-        const user = await User.findOne({ email, password });
-        if (user) {
-            res.json({ 
-                success: true, 
-                user: { name: user.name, email: user.email, balance: user.balance } 
-            });
-        } else {
-            res.status(401).json({ success: false, message: "Invalid credentials" });
-        }
-    } catch (error) {
-        res.status(500).json({ message: "Login error" });
+    const { email, password } = req.body;
+    const user = await User.findOne({ email, password });
+    if (user) {
+        res.json({ success: true, user });
+    } else {
+        res.status(401).json({ success: false, message: "Invalid credentials" });
     }
 });
 
-// Withdrawal Request
-app.post('/withdraw', (req, res) => {
-    const { email, amount, wallet } = req.body;
-    console.log(`💰 WITHDRAWAL: ${email} requested $${amount} to ${wallet}`);
-    res.json({ success: true, message: "Withdrawal request submitted." });
+// NEW: Place a Withdrawal (Saves to History)
+app.post('/withdraw', async (req, res) => {
+    try {
+        const { email, amount, wallet } = req.body;
+        
+        // Save the request to the database
+        const newWithdrawal = new Withdrawal({ email, amount, wallet });
+        await newWithdrawal.save();
+        
+        res.json({ success: true, message: "Withdrawal is now Pending." });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Error processing withdrawal" });
+    }
 });
 
-// --- SERVER START ---
+// NEW: Get Withdrawal History (For the user to see)
+app.get('/withdrawal-history/:email', async (req, res) => {
+    try {
+        const history = await Withdrawal.find({ email: req.params.email }).sort({ date: -1 });
+        res.json({ success: true, history });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Could not fetch history" });
+    }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server active on port ${PORT}`));
