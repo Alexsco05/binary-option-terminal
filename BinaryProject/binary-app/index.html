@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BinaryOption | Global Trading Terminal</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;700;800&display=swap');
+
+        :root {
+            --green: #00ff88;
+            --red: #ff4d4d;
+            --blue: #00d9ff;
+            --dark: #010409;
+            --glass: rgba(13, 17, 23, 0.9);
+            --border: rgba(255, 255, 255, 0.1);
+        }
+
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; margin: 0; padding: 0; }
+
+        body {
+            background: var(--dark);
+            color: #f0f6fc;
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            line-height: 1.6;
+        }
+
+        .container { max-width: 600px; margin: 0 auto; padding: 0 20px; }
+
+        /* Navigation */
+        nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            background: rgba(1, 4, 9, 0.95);
+            backdrop-filter: blur(15px);
+            border-bottom: 1px solid var(--border);
+            position: sticky; top: 0; z-index: 1000;
+        }
+
+        .logo { font-weight: 800; display: flex; align-items: center; gap: 8px; }
+        .logo-icon { background: var(--green); color: #000; padding: 5px; border-radius: 8px; font-size: 14px; box-shadow: 0 0 15px var(--green); }
+
+        /* Screens */
+        .screen { display: none; min-height: 100vh; padding-bottom: 50px; animation: fadeIn 0.4s ease; }
+        .active-screen { display: block; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; } }
+
+        /* Professional Dashboard Header */
+        .dash-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: linear-gradient(90deg, #111827, #010409);
+            padding: 20px;
+            border-radius: 20px;
+            margin: 20px 0;
+            border: 1px solid var(--border);
+        }
+
+        .balance-side { text-align: left; }
+        .balance-side p { font-size: 0.65rem; font-weight: 800; opacity: 0.6; letter-spacing: 1px; }
+        .balance-side h2 { font-size: 1.8rem; color: var(--green); }
+
+        .user-side { text-align: right; }
+        .user-side p { font-size: 0.7rem; color: var(--blue); font-weight: 700; }
+
+        /* Curly Cards */
+        .feature-card {
+            background: var(--glass);
+            border: 1px solid var(--border);
+            border-radius: 20px 20px 60px 60px;
+            padding: 30px; margin-top: 25px;
+            border-bottom: 5px solid var(--green);
+        }
+        .blue-card { border-bottom: 5px solid var(--blue); }
+
+        .check-list { list-style: none; margin-top: 15px; }
+        .check-list li { margin-bottom: 10px; display: flex; align-items: flex-start; gap: 10px; font-size: 0.9rem; }
+        .check-list li::before { content: "✓"; color: var(--green); font-weight: 800; }
+
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin: 25px 0; }
+        .stat-box { background: rgba(255,255,255,0.03); padding: 20px; border-radius: 20px; text-align: center; border: 1px solid var(--border); }
+        
+        .btn-main {
+            width: 100%; padding: 18px; border-radius: 15px; border: none;
+            background: var(--green); color: #000; font-weight: 800; cursor: pointer; margin-top: 10px;
+        }
+
+        input, select { width: 100%; padding: 15px; border-radius: 12px; border: 1px solid #333; background: #000; color: #fff; margin-bottom: 12px; outline: none; }
+
+        .chart-frame { height: 380px; border-radius: 20px; overflow: hidden; border: 1px solid #222; margin-bottom: 15px; }
+
+        /* Modals */
+        .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.95); display: none; flex-direction: column; align-items: center; justify-content: center; z-index: 5000; padding: 20px; }
+        .modal-content { background: #0d1117; width: 100%; max-width: 400px; padding: 30px; border-radius: 25px; border: 1px solid var(--border); position: relative; }
+        .close-btn { position: absolute; top: 15px; right: 20px; font-size: 1.5rem; cursor: pointer; color: #888; }
+        
+        .loader { width: 50px; height: 50px; border: 5px solid #222; border-top: 5px solid var(--green); border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body onload="initApp()">
+
+    <nav>
+        <div class="logo"><div class="logo-icon">🚀</div>Binary<span>Option</span></div>
+        <div id="nav-btns">
+            <button onclick="showScreen('login-screen')" style="background:transparent; border:none; color:#fff; font-weight:800; margin-right:10px;">Login</button>
+            <button onclick="showScreen('signup-screen')" style="background:#fff; border:none; padding:6px 12px; border-radius:8px; font-weight:800; color:#000;">Sign Up</button>
+        </div>
+    </nav>
+
+    <div id="home-screen" class="screen active-screen">
+        <div class="container">
+            <div style="text-align: center; padding: 30px 0;">
+                <span style="color: var(--green); font-weight: 800; font-size: 0.6rem; letter-spacing: 2px;">VOTED #1 PLATFORM 2026</span>
+                <h1 style="font-size: 2.5rem; line-height: 1.1; margin: 10px 0;">Trade Assets with <span style="color: var(--green);">Precision.</span></h1>
+                <div class="stats-grid">
+                    <div class="stat-box"><h3>$250M+</h3><p>TOTAL PAYOUTS</p></div>
+                    <div class="stat-box"><h3>52.4K</h3><p>ACTIVE USERS</p></div>
+                </div>
+                <button class="btn-main" onclick="showScreen('signup-screen')">START TRADING NOW</button>
+            </div>
+
+            <div class="feature-card">
+                <h2>About Binary Option Trading</h2>
+                <p>Binary option trading is a modern way to participate in global markets by predicting movements within a fixed time frame. Success doesn't depend on huge capital, but on opportunity and guidance.</p>
+            </div>
+
+            <div class="feature-card blue-card">
+                <span style="color: var(--blue); font-size: 0.6rem; font-weight: 800;">ESTABLISHED 2010</span>
+                <h2 style="color: var(--blue); margin-top:5px;">Mr. Henry's Vision</h2>
+                <p>Founded in 2010 by CEO Mr. Henry, our mission is to empower traders with real-time data and proven market analysis strategies.</p>
+            </div>
+
+            <div class="feature-card">
+                <h2>Why Choose Us?</h2>
+                <ul class="check-list">
+                    <li>Over a decade of trading experience</li>
+                    <li>Professional leadership and expert strategies</li>
+                    <li>Beginner-friendly approach</li>
+                    <li>Fast-paced trading opportunities</li>
+                    <li>Dedicated support and guidance</li>
+                </ul>
+            </div>
+
+            <div class="feature-card blue-card">
+                <h2 style="color: var(--blue);">Security & Trust</h2>
+                <p>Transparency and accountability are our core values. We take strong measures to protect user funds and personal information.</p>
+            </div>
+
+            <div class="feature-card">
+                <h2>Our Expertise & Strategy</h2>
+                <ul class="check-list">
+                    <li>Deep market research and analysis</li>
+                    <li>Short-term trading with clear entry/exit points</li>
+                    <li>Disciplined approach to risk management</li>
+                    <li>Continuous trend monitoring</li>
+                </ul>
+            </div>
+
+            <footer style="padding: 30px 0; text-align: center; opacity: 0.5; font-size: 0.7rem;">
+                <p>© 2026 BinaryOption Global Ltd.</p>
+                <a href="whatsapp://send?text=Hello BinaryOption Support" style="color: var(--green); text-decoration: none;">Contact Support</a>
+            </footer>
+        </div>
+    </div>
+
+    <div id="signup-screen" class="screen">
+        <div class="container" style="padding-top: 50px;">
+            <div class="feature-card">
+                <h2 style="text-align: center; margin-bottom: 15px;">Create Account</h2>
+                <input type="text" id="reg-name" placeholder="Full Name">
+                <input type="email" id="reg-email" placeholder="Email">
+                <input type="password" id="reg-pass" placeholder="Password">
+                <button class="btn-main" onclick="handleAuth('signup')">Create Account</button>
+                <p style="text-align:center; margin-top:15px; font-size:0.8rem; color:var(--blue); cursor:pointer;" onclick="showScreen('login-screen')">Already have an account? Log in</p>
+            </div>
+        </div>
+    </div>
+
+    <div id="login-screen" class="screen">
+        <div class="container" style="padding-top: 50px;">
+            <div class="feature-card blue-card">
+                <h2 style="text-align: center; margin-bottom: 15px;">Welcome Back</h2>
+                <input type="email" id="log-email" placeholder="Email">
+                <input type="password" id="log-pass" placeholder="Password">
+                <button class="btn-main" style="background:var(--blue)" onclick="handleAuth('login')">Login</button>
+                <p style="text-align:center; margin-top:15px; font-size:0.8rem; color:var(--green); cursor:pointer;" onclick="showScreen('signup-screen')">Don't have an account? Sign Up</p>
+            </div>
+        </div>
+    </div>
+
+    <div id="dash-screen" class="screen">
+        <div class="container">
+            <div class="dash-header">
+                <div class="balance-side">
+                    <p>TOTAL BALANCE</p>
+                    <h2 id="main-balance">$0.00</h2>
+                </div>
+                <div class="user-side">
+                    <p id="trader-display">TRADER</p>
+                    <button onclick="toggleWithdraw(true)" style="background:var(--blue); border:none; color:#000; padding:5px 12px; border-radius:8px; font-weight:800; font-size:0.7rem; margin-top:5px; cursor:pointer;">WITHDRAW</button>
+                </div>
+            </div>
+
+            <select id="asset-selector" onchange="loadChart()">
+                <option value="BINANCE:BTCUSDT">BTC/USDT (Bitcoin)</option>
+                <option value="BINANCE:ETHUSDT">ETH/USDT (Ethereum)</option>
+                <option value="BINANCE:SOLUSDT">SOL/USDT (Solana)</option>
+                <option value="BINANCE:BNBUSDT">BNB/USDT (Binance Coin)</option>
+            </select>
+
+            <div class="chart-frame" id="tradingview-container"></div>
+
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-bottom:20px;">
+                <button class="btn-main" style="background:var(--green); margin-top:0;" onclick="startTrade('CALL')">CALL</button>
+                <button class="btn-main" style="background:var(--red); color:#fff; margin-top:0;" onclick="startTrade('PUT')">PUT</button>
+            </div>
+
+            <button onclick="logout()" style="width:100%; padding:15px; background:none; border:1px solid #333; color:#888; border-radius:12px;">Secure Logout</button>
+        </div>
+    </div>
+
+    <div id="withdraw-modal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" onclick="toggleWithdraw(false)">&times;</span>
+            <h2 style="margin-bottom:10px; color:var(--blue);">Withdraw Funds</h2>
+            <p style="font-size:0.75rem; opacity:0.7; margin-bottom:20px;">Minimum withdrawal is $50.00</p>
+            <input type="number" id="withdraw-amt" placeholder="Amount ($)">
+            <input type="text" id="wallet-address" placeholder="Crypto Wallet Address">
+            <button class="btn-main" style="background:var(--blue)" onclick="handleWithdraw()">Request Withdrawal</button>
+        </div>
+    </div>
+
+    <div id="trade-modal" class="modal">
+        <div class="loader"></div>
+        <h2 style="margin-top:20px; letter-spacing:1px;">EXECUTING ORDER...</h2>
+    </div>
+
+    <script src="https://s3.tradingview.com/tv.js"></script>
+    <script>
+        const API_URL = "http://localhost:3000";
+        let user = JSON.parse(localStorage.getItem('binary_user'));
+
+        function initApp() { if(user) setupUI(); }
+
+        function showScreen(id) {
+            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active-screen'));
+            document.getElementById(id).classList.add('active-screen');
+            if(id === 'dash-screen') loadChart();
+        }
+
+        async function handleAuth(type) {
+            const name = document.getElementById('reg-name')?.value;
+            const email = type === 'signup' ? document.getElementById('reg-email').value : document.getElementById('log-email').value;
+            const password = type === 'signup' ? document.getElementById('reg-pass').value : document.getElementById('log-pass').value;
+
+            try {
+                const res = await fetch(`${API_URL}/${type}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, email, password })
+                });
+                const data = await res.json();
+                if(data.success) {
+                    user = data.user;
+                    localStorage.setItem('binary_user', JSON.stringify(user));
+                    setupUI();
+                } else { alert(data.message); }
+            } catch (e) { alert("Server Offline! Is Termux running?"); }
+        }
+
+        function setupUI() {
+            document.getElementById('nav-btns').innerHTML = `<button style="background:var(--green); border:none; padding:6px 12px; border-radius:8px; font-weight:800; font-size:0.75rem;">● Online</button>`;
+            document.getElementById('main-balance').innerText = `$${user.balance.toLocaleString()}`;
+            document.getElementById('trader-display').innerText = user.name.split(' ')[0].toUpperCase();
+            showScreen('dash-screen');
+        }
+
+        function loadChart() {
+            const asset = document.getElementById('asset-selector').value;
+            new TradingView.widget({ "autosize": true, "symbol": asset, "interval": "1", "theme": "dark", "container_id": "tradingview-container", "hide_side_toolbar": true });
+        }
+
+        function toggleWithdraw(show) {
+            document.getElementById('withdraw-modal').style.display = show ? 'flex' : 'none';
+        }
+
+        function handleWithdraw() {
+            const amt = document.getElementById('withdraw-amt').value;
+            if(amt < 50) return alert("Minimum withdrawal is $50");
+            alert(`Withdrawal request for $${amt} submitted. Our team will verify the address.`);
+            toggleWithdraw(false);
+        }
+
+        function startTrade(type) {
+            document.getElementById('trade-modal').style.display = 'flex';
+            setTimeout(() => { document.getElementById('trade-modal').style.display = 'none'; alert(type + " position opened successfully!"); }, 2000);
+        }
+
+        function logout() { localStorage.clear(); window.location.reload(); }
+    </script>
+</body>
+</html>

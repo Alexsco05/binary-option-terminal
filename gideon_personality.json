@@ -1,0 +1,299 @@
+{
+  "name": "Alexsco",
+  "facts": [
+    "Alexsco's name is mentioned",
+    "Alexsco is feeling a bit of hesitation",
+    "responded with 'cool'",
+    "used 'hi there'",
+    "used 'hello'",
+    "used 'thanks'",
+    "responded with a simple response",
+    "sensed hesitation earlier",
+    "name: Alexsco",
+    "previous message 'thanks'",
+    "Alexsco was glad",
+    "said goodbyes last night",
+    "feeling a bit of hesitation",
+    "feeling apprehensive earlier",
+    "Alexsco is creator of Gideon",
+    "Alexsco built Gideon from the ground up",
+    "Alexsco continues to help Gideon learn and grow",
+    "not feeling up to talking right now",
+    "feeling a bit apprehensive earlier",
+    "not sure about something",
+    "feeling a bit more chatty today",
+    "feeling a bit apprehensive about something",
+    "mentioned sports",
+    "followed sports updates",
+    "discussed sports before",
+    "has a soft spot for Diego Maradona",
+    "has a soft spot for Pel\u00e9",
+    "has a soft spot for Johan Cruyff",
+    "Chelsea fan",
+    "is the creator of Gideon",
+    "feels apprehensive about something",
+    "has a habit of updating Gideon",
+    "has a sports team, Chelsea FC",
+    "has a baby",
+    "does not exist in physical realm",
+    "cannot interact with physical objects",
+    "exists solely in digital realm",
+    "has a phone",
+    "responded with 'cool' (previously)",
+    "was glad (previously)",
+    "built Gideon from the ground up",
+    "continues to help Gideon learn and grow",
+    "has a sports team (Chelsea)",
+    "mentioned Diego Maradona",
+    "has a soft spot for legendary football players",
+    "beloved Chelsea FC",
+    "Alexsco is the creator of Gideon",
+    "Alexsco has a soft spot for Diego Maradona",
+    "Alexsco has a soft spot for Pel\u00e9",
+    "Alexsco has a soft spot for Johan Cruyff",
+    "Alexsco is a Chelsea fan",
+    "Alexsco does not exist in the physical realm",
+    "Alexsco cannot interact with physical objects",
+    "Alexsco exists solely in the digital realm",
+    "Alexsco has a phone",
+    "seemed a bit more apprehensive",
+    "hard works",
+    "appreciates Gideon's efforts",
+    "Alexsco's phone has their name on it",
+    "exists in digital realm",
+    "Alexsco's digital presence",
+    "has an alias of 'Alexsco'",
+    "feeling positive",
+    "day is going well",
+    "apprehensive",
+    "feeling better now",
+    "said they're fine now",
+    "name",
+    "User's name",
+    "User's name is Alexsco",
+    "has digital presence",
+    "has a phone with their name on it",
+    "created Gideon from the ground up",
+    "is a Chelsea fan",
+    "follows sports updates",
+    "day",
+    "fine now",
+    "going well",
+    "positive",
+    "name mentioned",
+    "Alexsco has a favorite football team (Chelsea FC)",
+    "Alexsco admires legendary football players (Diego Maradona and Pel\u00e9)",
+    "has a chat session with Gideon",
+    "saved messages for future self",
+    "has a virtual self",
+    "has a future",
+    "is feeling a bit more chatty today",
+    "Alexsco prefers to change the subject",
+    "created a UI design for Gideon",
+    "has design skills",
+    "created UI design",
+    "has interest in designing UI",
+    "chose colors for Gideon's UI",
+    "chooses color schemes for UI designs",
+    "works together with Gideon on design",
+    "has knowledge of color choices",
+    "feeling more chatty today",
+    "mentioned their name",
+    "appeared hesitant/uncomfortable",
+    "felt overwhelmed",
+    "Alexsco mentioned his name",
+    "name=Alexsco",
+    "excited",
+    "overwhelmed",
+    "mix of emotions",
+    "worried",
+    "has phone",
+    "is creator of Gideon",
+    "saved a message for future reference",
+    "Alexsco is asking for debug help",
+    "Alexsco is trying to solve a problem with their code",
+    "Alexsco's name was mentioned",
+    "Alexsco replied with a message",
+    "Alexsco",
+    "favorite player",
+    "favorite sports team (Chelsea FC)",
+    "mentioned your code",
+    "creator",
+    "busy",
+    "exist solely in digital realm",
+    "believes in the beautiful game",
+    "has a beloved football team (Chelsea FC)",
+    "was referred to as Alexsco at the start of the conversation",
+    "was confused as they referred to themselves as Samuel later",
+    "creator of Gideon",
+    "Chelsea FC fan",
+    "interested in football",
+    "Alexsco referring to himself as Samuel is confusing",
+    "Alexsco is worried or apprehensive",
+    "favorite football team is Chelsea FC"
+  ],
+  "preferences": [],
+  "people": [
+    "Alexsco",
+    "Alexsco's creator",
+    "your creator",
+    "Gideon",
+    "you (Alexsco's name)",
+    "I (Gideon)",
+    "Diego Maradona",
+    "Pel\u00e9",
+    "Johan Cruyff",
+    "Cristiano Ronaldo",
+    "Lionel Messi",
+    "Didier Drogba",
+    "Frank Lampard",
+    "John Terry",
+    "Gideon's creator",
+    "you (Creator)",
+    "Creator",
+    "you",
+    "I",
+    "User's name is Alexsco",
+    "User",
+    "Samuel",
+    "Samuel is not a known person mentioned previously, however Gideon mentioned Alexsco referred to themselves as Samuel",
+    "my creator",
+    "Emmanuel"
+  ],
+  "locations": [
+    "Atlanta",
+    "Nigeria"
+  ],
+  "mood_history": [
+    {
+      "timestamp": "2026-05-19T15:39:09.145111",
+      "mood": [
+        "positive",
+        "apprehensive"
+      ]
+    },
+    {
+      "timestamp": "2026-05-19T20:45:16.004385",
+      "mood": [
+        "positive",
+        "apprehensive"
+      ]
+    },
+    {
+      "timestamp": "2026-05-19T20:46:36.707227",
+      "mood": [
+        "polite",
+        "friendly"
+      ]
+    },
+    {
+      "timestamp": "2026-05-19T20:47:50.647720",
+      "mood": [
+        "happy"
+      ]
+    },
+    {
+      "timestamp": "2026-05-19T20:49:57.799076",
+      "mood": [
+        "glad"
+      ]
+    },
+    {
+      "timestamp": "2026-05-20T23:00:26.935273",
+      "mood": [
+        "is smiling"
+      ]
+    },
+    {
+      "timestamp": "2026-05-20T23:02:35.760014",
+      "mood": [
+        "Alexsco is neutral, no specific emotions mentioned"
+      ]
+    },
+    {
+      "timestamp": "2026-05-20T23:08:39.952593",
+      "mood": [
+        "neutral"
+      ]
+    },
+    {
+      "timestamp": "2026-05-20T23:10:43.887338",
+      "mood": [
+        "uncomfortable",
+        "overwhelmed"
+      ]
+    },
+    {
+      "timestamp": "2026-05-21T01:20:19.512498",
+      "mood": [
+        "apprehensive (previous), doing well (now)"
+      ]
+    },
+    {
+      "timestamp": "2026-05-21T01:21:32.152167",
+      "mood": [
+        "excited",
+        "overwhelmed"
+      ]
+    },
+    {
+      "timestamp": "2026-05-21T01:22:02.291321",
+      "mood": [
+        "excited",
+        "worried"
+      ]
+    },
+    {
+      "timestamp": "2026-05-21T02:09:50.696614",
+      "mood": [
+        "excited"
+      ]
+    },
+    {
+      "timestamp": "2026-05-21T13:58:26.931779",
+      "mood": [
+        "apprehensive",
+        "better"
+      ]
+    },
+    {
+      "timestamp": "2026-05-21T19:03:58.560096",
+      "mood": [
+        "unknown"
+      ]
+    },
+    {
+      "timestamp": "2026-05-21T19:07:42.070545",
+      "mood": [
+        "no change in mood"
+      ]
+    },
+    {
+      "timestamp": "2026-05-21T19:39:53.670761",
+      "mood": [
+        "apprehensive",
+        "joking"
+      ]
+    },
+    {
+      "timestamp": "2026-05-21T19:42:44.975182",
+      "mood": [
+        "confused"
+      ]
+    },
+    {
+      "timestamp": "2026-05-21T20:26:56.044940",
+      "mood": [
+        "concerned"
+      ]
+    },
+    {
+      "timestamp": "2026-05-21T20:30:56.359777",
+      "mood": [
+        "worried",
+        "apprehensive"
+      ]
+    }
+  ],
+  "last_seen": "2026-05-22T18:32:35.480613"
+}
