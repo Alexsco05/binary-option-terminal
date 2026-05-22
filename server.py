@@ -9,6 +9,10 @@ import requests
 import json
 import threading
 import datetime
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 
 app = Flask(__name__)
