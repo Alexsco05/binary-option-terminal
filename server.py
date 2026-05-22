@@ -702,12 +702,12 @@ def run():
 
 # ================= START =================
 if __name__ == "__main__":
-    try:
+    print(f"{BOT_NAME} online")
 
-        print(f"{BOT_NAME} online")
-        print(f"Memory files: {MEMORY_FILE}, {PERSONALITY_FILE}, {HISTORY_FILE}")
-        port = int(os.environ.get("PORT", 5000))
-        app.run(host="0.0.0.0", port=port)
+    print(f"Memory files: {MEMORY_FILE}, {PERSONALITY_FILE}, {HISTORY_FILE}")
+
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
     except Exception as e:
         print(f"[Startup] Failed: {e}")
         raise
