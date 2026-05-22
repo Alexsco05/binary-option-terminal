@@ -28,6 +28,9 @@ contacts.json
 gideon_memory.json
 gideon_history.json
 user_profile.json
+package.json
+package-lock.json
+server.js
 
 # Downloads and storage
 downloads/
