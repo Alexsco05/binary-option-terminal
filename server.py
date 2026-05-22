@@ -3,7 +3,6 @@
 # Version: 3.0 - Memory Update
 
 from flask import Flask, request, jsonify
-from dotenv import load_dotenv
 import os
 import subprocess
 import requests
@@ -705,6 +704,7 @@ def run():
 # ================= START =================
 if __name__ == "__main__":
     try:
+                 if os.name == "posix" and "TERMUX_VERSION" in os.environ:
         os.system("termux-wake-lock")
         print(f"{BOT_NAME} online")
         print(f"Memory files: {MEMORY_FILE}, {PERSONALITY_FILE}, {HISTORY_FILE}")
@@ -712,3 +712,4 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=port)
     except Exception as e:
         print(f"[Startup] Failed: {e}")
+        raise
