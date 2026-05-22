@@ -3,17 +3,15 @@
 # Version: 3.0 - Memory Update
 
 from flask import Flask, request, jsonify
+from dotenv import load_dotenv
 import os
 import subprocess
 import requests
 import json
 import threading
 import datetime
-from dotenv import load_dotenv
-import os
 
 load_dotenv()
-
 
 app = Flask(__name__)
 
@@ -309,7 +307,8 @@ def build_system_prompt():
 def gideon_speak(text):
     print(f"{BOT_NAME}: {text}")
     try:
-        subprocess.Popen(["termux-tts-speak", text])
+        if os.path.exists("/data/data/com.termux"):
+            subprocess.Popen(["termux-tts-speak", text])
     except Exception as e:
         print(f"[Speech] Failed: {e}")
 
@@ -392,11 +391,16 @@ OFFLINE_COMMANDS = [
 ]
 
 # ================= OFFLINE HANDLER =================
+def is_termux():
+    return os.path.exists("/data/data/com.termux")
+
 def handle_offline(msg):
     msg_lower = msg.lower()
 
     # CALL
     if msg_lower.startswith("call"):
+        if not is_termux():
+            return None
         try:
             target = msg_lower.replace("call", "").strip()
             number = CONTACTS.get(target, target)
@@ -412,6 +416,8 @@ def handle_offline(msg):
 
     # SMS
     if msg_lower.startswith("send message"):
+        if not is_termux():
+            return None
         try:
             parts = msg_lower.replace("send message", "").strip().split(" ", 1)
             if len(parts) == 2:
@@ -429,6 +435,8 @@ def handle_offline(msg):
 
     # BATTERY
     if "battery" in msg_lower:
+        if not is_termux():
+            return None
         try:
             output = subprocess.check_output(
                 ["termux-battery-status"]
@@ -442,6 +450,8 @@ def handle_offline(msg):
 
     # SEARCH
     if msg_lower.startswith("search"):
+        if not is_termux():
+            return None
         try:
             query = msg_lower.replace("search", "").strip()
             reply = f"Searching for {query}"
@@ -457,11 +467,11 @@ def handle_offline(msg):
     for cmd in OFFLINE_COMMANDS:
         if any(keyword in msg_lower for keyword in cmd["keywords"]):
             try:
-                if cmd["action"]:
+                if is_termux() and cmd["action"]:
                     cmd["action"]()
                 if cmd["response"]:
                     gideon_speak(cmd["response"])
-                return cmd["response"]
+                    return cmd["response"]
             except Exception as e:
                 print(f"[Offline] Command failed: {e}")
 
