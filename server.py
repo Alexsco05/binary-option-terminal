@@ -703,8 +703,7 @@ def run():
 # ================= START =================
 if __name__ == "__main__":
     try:
-                 if os.name == "posix" and "TERMUX_VERSION" in os.environ:
-        os.system("termux-wake-lock")
+
         print(f"{BOT_NAME} online")
         print(f"Memory files: {MEMORY_FILE}, {PERSONALITY_FILE}, {HISTORY_FILE}")
         port = int(os.environ.get("PORT", 5000))
