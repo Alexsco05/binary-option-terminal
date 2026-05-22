@@ -10,7 +10,6 @@ import json
 import threading
 import datetime
 
-load_dotenv(os.path.expanduser(".env"))
 
 app = Flask(__name__)
 
