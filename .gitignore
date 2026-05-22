@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+
+# Environment
+.env
+
+# Termux / Android noise
+.cache/
+.local/
+.config/
+.ssh/
+.termux/
+.bash_history
+.python_history
+
+# Media files
+*.jpg
+*.png
+*.mp3
+*.mp4
+
+# Node (if any accidental JS folders)
+node_modules/
+
+# Personal data
+contacts.json
+gideon_memory.json
+gideon_history.json
+user_profile.json
+
+# Downloads and storage
+downloads/
+storage/
