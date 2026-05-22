@@ -3,7 +3,6 @@
 # Version: 3.0 - Memory Update
 
 from flask import Flask, request, jsonify
-from dotenv import load_dotenv
 import os
 import subprocess
 import requests
@@ -11,7 +10,6 @@ import json
 import threading
 import datetime
 
-load_dotenv()
 
 app = Flask(__name__)
 
