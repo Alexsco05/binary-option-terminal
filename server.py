@@ -11,7 +11,7 @@ import json
 import threading
 import datetime
 
-load_dotenv(os.path.expanduser("~/.env"))
+load_dotenv(os.path.expanduser(".env"))
 
 app = Flask(__name__)
 
@@ -708,6 +708,7 @@ if __name__ == "__main__":
         os.system("termux-wake-lock")
         print(f"{BOT_NAME} online")
         print(f"Memory files: {MEMORY_FILE}, {PERSONALITY_FILE}, {HISTORY_FILE}")
-        app.run(host="0.0.0.0", port=5000)
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host="0.0.0.0", port=port)
     except Exception as e:
         print(f"[Startup] Failed: {e}")
