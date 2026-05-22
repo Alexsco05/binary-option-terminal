@@ -1,9 +1,0 @@
-[user]
-	name = Alexsco05
-	email = adegolualex46@gmail.com
-[credential "https://github.com"]
-	helper = 
-	helper = !/data/data/com.termux/files/usr/bin/gh auth git-credential
-[credential "https://gist.github.com"]
-	helper = 
-	helper = !/data/data/com.termux/files/usr/bin/gh auth git-credential

@@ -1,1 +1,0 @@
-python ~/gideon.py
