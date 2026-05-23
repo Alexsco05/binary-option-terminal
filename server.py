@@ -14,7 +14,7 @@ import datetime
 app = Flask(__name__)
 
 # ================= CONFIG =================
-USER_NAME = "Alexsco"
+USER_NAME = "USER_NAME"
 BOT_NAME = "Gideon"
 
 GROQ_KEYS = [
