@@ -243,27 +243,26 @@ def build_system_prompt(user_name: str, device_id: str):
     )
 
 # ================= AI CALLS =================
-def call_groq_raw(prompt: str):
-    try:
-        r = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_KEYS[0]}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": MODEL_FAST,
-                "messages": [{"role": "user", "content": prompt}]
-            },
-            timeout=8
-        )
-        data = r.json()
-        return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        print(f"[Groq Raw] Failed: {e}")
-        return None
+# ================= SMART MODEL ROUTER =================
+def route_model(msg: str) -> str:
+    msg_lower = msg.lower()
 
-def call_groq(msg: str, user_name: str, device_id: str, retries=3):
+    # complex reasoning queries get the bigger model
+    complex_keywords = [
+        "explain", "analyze", "compare", "why", "how does",
+        "difference between", "pros and cons", "write code",
+        "debug", "summarize", "translate", "calculate"
+    ]
+    if any(k in msg_lower for k in complex_keywords):
+        return "complex"
+
+    # short conversational queries get fast model
+    if len(msg.split()) < 8:
+        return "fast"
+
+    return "normal"
+
+def call_groq_model(msg: str, model: str, user_name: str, device_id: str, retries=2):
     for attempt in range(retries):
         try:
             st = get_short_term(device_id)
@@ -276,50 +275,62 @@ def call_groq(msg: str, user_name: str, device_id: str, retries=3):
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": MODEL_FAST,
+                    "model": model,
                     "messages": st + [
                         {"role": "user", "content": msg}
                     ]
                 },
-                timeout=10
+                timeout=12
             )
             data = r.json()
             if "choices" in data:
                 return data["choices"][0]["message"]["content"]
-            print(f"[Groq] Attempt {attempt + 1} failed: {data}")
+            print(f"[Groq {model}] Failed: {data}")
 
         except Exception as e:
-            print(f"[Groq] Attempt {attempt + 1} error: {e}")
+            print(f"[Groq {model}] Error: {e}")
             if attempt < retries - 1:
                 import time
                 time.sleep(1)
     return None
 
-def call_openrouter(msg: str, user_name: str, device_id: str):
-    try:
-        r = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_KEYS[0]}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "mistralai/mistral-7b-instruct",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": build_system_prompt(user_name, device_id)
-                    },
-                    {"role": "user", "content": msg}
-                ]
-            },
-            timeout=10
-        )
-        data = r.json()
-        if "choices" in data:
-            return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        print(f"[OpenRouter] Failed: {e}")
+def call_openrouter_free(msg: str, user_name: str, device_id: str):
+    models = [
+        "google/gemma-2-9b-it:free",
+        "meta-llama/llama-3.1-8b-instruct:free",
+        "mistralai/mistral-7b-instruct:free"
+    ]
+
+    for model in models:
+        try:
+            r = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_KEYS[0]}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://gideon-ai.app",
+                    "X-Title": "Gideon AI"
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": build_system_prompt(user_name, device_id)
+                        },
+                        {"role": "user", "content": msg}
+                    ]
+                },
+                timeout=12
+            )
+            data = r.json()
+            if "choices" in data:
+                print(f"[OpenRouter] Success with {model}")
+                return data["choices"][0]["message"]["content"]
+            print(f"[OpenRouter {model}] Failed: {data}")
+        except Exception as e:
+            print(f"[OpenRouter {model}] Error: {e}")
+
     return None
 
 # ================= NETWORK CHECK =================
@@ -337,7 +348,7 @@ def process(msg: str, user_name: str, device_id: str):
         return "No input received"
 
     if not is_online():
-        return "I am offline right now. Check your connection and try again."
+        return "I am offline right now. Try again."
 
     cache_key = f"{device_id}:{msg.lower()}"
     if cache_key in CACHE:
@@ -345,10 +356,31 @@ def process(msg: str, user_name: str, device_id: str):
         update_short_term(msg, cached, device_id)
         return cached
 
-    answer = call_groq(msg, user_name, device_id)
+    route = route_model(msg)
+    answer = None
+
+    if route == "complex":
+        # try bigger model first for complex questions
+        answer = call_groq_model(
+            msg, "llama-3.3-70b-versatile", user_name, device_id
+        )
+    elif route == "fast":
+        answer = call_groq_model(
+            msg, "llama-3.1-8b-instant", user_name, device_id
+        )
+    else:
+        answer = call_groq_model(
+            msg, "llama-3.1-8b-instant", user_name, device_id
+        )
+
+    # fallback chain
+    if not answer:
+        answer = call_groq_model(
+            msg, "llama-3.1-8b-instant", user_name, device_id
+        )
 
     if not answer:
-        answer = call_openrouter(msg, user_name, device_id)
+        answer = call_openrouter_free(msg, user_name, device_id)
 
     if not answer:
         answer = "I could not process that. Try again."
