@@ -3,14 +3,12 @@
 # Version: 4.0 - Clean AI Engine
 
 from flask import Flask, request, jsonify
-from dotenv import load_dotenv
 import os
 import requests
 import json
 import threading
 import datetime
 
-load_dotenv()
 
 app = Flask(__name__)
 
