@@ -243,6 +243,27 @@ def build_system_prompt(user_name: str, device_id: str):
     )
 
 # ================= AI CALLS =================
+def call_groq_raw(prompt: str):
+    try:
+        r = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_KEYS[0]}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "llama-3.1-8b-instant",
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=8
+        )
+        data = r.json()
+        if "choices" in data:
+            return data["choices"][0]["message"]["content"]
+        return None
+    except Exception as e:
+        print(f"[Groq Raw] Failed: {e}")
+        return None
 # ================= SMART MODEL ROUTER =================
 def route_model(msg: str) -> str:
     msg_lower = msg.lower()
@@ -452,7 +473,10 @@ def run():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "online", "bot": BOT_NAME})
+    return jsonify({"status": "online", "bot": BOT_NAME,
+ "groq_key_set": bool(GROQ_KEYS[0]),
+        "openrouter_key_set": bool(OPENROUTER_KEYS[0])
+    })
 
 # ================= START =================
 if __name__ == "__main__":
