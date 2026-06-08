@@ -1,6 +1,6 @@
 # ================= GIDEON BACKEND =================
 # Creator: Alexsco (Adegolu Alex)
-# Version: 5.0 - Smart Action System
+# Version: 6.0 - Multi-Model Brain
 
 from flask import Flask, request, jsonify
 import os
@@ -25,16 +25,64 @@ OPENROUTER_KEYS = [
     os.getenv("OPENROUTER_KEY_2", "")
 ]
 
-MODEL_FAST = "llama-3.1-8b-instant"
-MODEL_COMPLEX = "llama-3.3-70b-versatile"
+GEMINI_KEY = [
+    os.getenv("GEMINI_KEY_1", ""),
+    os.getenv("GEMINI_KEY_2", "")
+]
+
+MISTRAL_KEY = [ 
+    os.getenv("MISTRAL_KEY_1", ""),
+    os.getenv("MISTRAL_KEY_2", "")
+]
+
+COHERE_KEY = [ 
+    os.getenv("COHERE_KEY_1", ""),
+    os.getenv("COHERE_KEY_2", "")
+]
+
+# ─── MODEL REGISTRY ───────────────────────────────
+# Each task type has a primary and fallback model
+MODELS = {
+    "fast": {
+        "primary": {"provider": "groq", "model": "llama-3.1-8b-instant"},
+        "fallback": {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"}
+    },
+    "complex": {
+        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "fallback": {"provider": "openrouter", "model": "google/gemma-2-9b-it:free"}
+    },
+    "creative": {
+        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "fallback": {"provider": "openrouter", "model": "mistralai/mistral-7b-instruct:free"}
+    },
+    "empathetic": {
+        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "fallback": {"provider": "openrouter", "model": "google/gemma-2-9b-it:free"}
+    },
+    "firm": {
+        "primary": {"provider": "groq", "model": "llama-3.1-8b-instant"},
+        "fallback": {"provider": "openrouter", "model": "mistralai/mistral-7b-instruct:free"}
+    },
+    "math": {
+        "primary": {"provider": "openrouter", "model": "qwen/qwen-2-math-72b-instruct:free"},
+        "fallback": {"provider": "groq", "model": "llama-3.3-70b-versatile"}
+    },
+    "vision": {
+        "primary": {"provider": "openrouter", "model": "google/gemma-3-12b-it:free"},
+        "fallback": {"provider": "groq", "model": "llama-3.1-8b-instant"}
+    },
+    "coding": {
+        "primary": {"provider": "openrouter", "model": "deepseek/deepseek-coder:free"},
+        "fallback": {"provider": "groq", "model": "llama-3.3-70b-versatile"}
+    }
+}
 
 # ================= CACHE =================
 CACHE = {}
-
-# ================= SHORT TERM MEMORY PER USER =================
 USER_SHORT_TERM = {}
 MEMORY_LIMIT = 20
 
+# ================= SHORT TERM MEMORY =================
 def get_short_term(device_id: str):
     if device_id not in USER_SHORT_TERM:
         USER_SHORT_TERM[device_id] = [
@@ -42,7 +90,7 @@ def get_short_term(device_id: str):
         ]
     return USER_SHORT_TERM[device_id]
 
-# ================= PER USER FILE PATHS =================
+# ================= FILE PATHS =================
 def get_user_files(device_id: str):
     safe_id = "".join(
         c for c in device_id if c.isalnum() or c == "-"
@@ -96,7 +144,7 @@ def save_personality(data: dict, device_id: str):
     except Exception as e:
         print(f"[Memory] Failed to save personality: {e}")
 
-# ================= SHORT TERM MEMORY UPDATE =================
+# ================= MEMORY UPDATES =================
 def update_short_term(user_msg: str, bot_reply: str, device_id: str):
     st = get_short_term(device_id)
     st.append({"role": "user", "content": user_msg})
@@ -124,7 +172,7 @@ def summarize_history(history: list, device_id: str):
             for h in older
         ])
         summary = call_groq_raw(
-            f"Summarize this conversation into a short paragraph capturing key facts: {older_text}"
+            f"Summarize this conversation into a short paragraph: {older_text}"
         )
         if summary:
             return [{
@@ -155,26 +203,22 @@ def _extract_facts_thread(user_msg: str, device_id: str):
             f"facts, preferences, people, locations, mood. "
             f"Each key except mood is a list of short strings. "
             f"mood is a single word like happy, sad, neutral, excited. "
-            f"Return empty lists if nothing found. "
-            f"Example: {{\"facts\": [], \"preferences\": [], \"people\": [], \"locations\": [], \"mood\": \"neutral\"}} "
+            f"If nothing to extract return exactly: "
+            f'{{\"facts\": [], \"preferences\": [], \"people\": [], \"locations\": [], \"mood\": \"neutral\"}} '
             f"Message: {user_msg}"
         )
 
         if not result:
             return
 
-        # clean markdown if present
         clean = result.strip()
         clean = clean.replace("```json", "").replace("```", "").strip()
-
-        # extract just the JSON object
         start = clean.find("{")
         end = clean.rfind("}") + 1
         if start == -1 or end == 0:
             return
 
-        json_str = clean[start:end]
-        extracted = json.loads(json_str)
+        extracted = json.loads(clean[start:end])
 
         for key in ["facts", "preferences", "people", "locations"]:
             for item in extracted.get(key, []):
@@ -202,7 +246,6 @@ def _extract_facts_thread(user_msg: str, device_id: str):
 
 # ================= ACTION TRIGGER PARSER =================
 def extract_action_trigger(reply: str):
-    """Extract [ACTION:command] from reply. Returns (clean_reply, action_or_None)"""
     pattern = r'\[ACTION:([^\]]+)\]'
     match = re.search(pattern, reply)
     if match:
@@ -211,9 +254,113 @@ def extract_action_trigger(reply: str):
         return clean, action
     return reply, None
 
+# ================= MODEL ROUTER =================
+def route_model(msg: str, personality: dict) -> str:
+    msg_lower = msg.lower()
+    mood = personality.get("mood", "neutral")
+
+    coding_keywords = [
+        "code", "program", "debug", "error", "kotlin", "python",
+        "java", "function", "class", "compile", "gradle", "syntax",
+        "algorithm", "api", "json", "xml", "crash", "exception"
+    ]
+    if any(k in msg_lower for k in coding_keywords):
+        return "coding"
+
+    complex_keywords = [
+        "explain", "analyze", "compare", "why", "how does",
+        "difference between", "pros and cons", "write a",
+        "summarize", "translate", "essay", "story",
+        "philosophy", "meaning of", "history of"
+    ]
+    if any(k in msg_lower for k in complex_keywords):
+        return "complex"
+
+    humor_keywords = [
+        "joke", "funny", "humor", "laugh", "roast",
+        "prank", "silly", "entertain", "riddle", "make me laugh"
+    ]
+    if any(k in msg_lower for k in humor_keywords):
+        return "creative"
+    math_keywords = [
+    "calculate", "solve", "equation", "integral", "derivative",
+    "algebra", "geometry", "trigonometry", "statistics",
+    "probability", "matrix", "calculus", "formula"
+]
+if any(k in msg_lower for k in math_keywords):
+    return "math"
+    emotional_keywords = [
+        "sad", "depressed", "anxious", "lonely", "stressed",
+        "worried", "scared", "angry", "upset", "hurt",
+        "heartbreak", "crying", "feel like", "i feel", "i am tired",
+        "nobody cares", "give up", "hopeless"
+    ]
+    if any(k in msg_lower for k in emotional_keywords):
+        return "empathetic"
+
+    strict_keywords = [
+        "shut up", "stupid", "idiot", "useless", "hate you",
+        "terrible", "worst", "rubbish", "nonsense", "dumb",
+        "you are trash", "garbage", "pathetic"
+    ]
+    if any(k in msg_lower for k in strict_keywords):
+        return "firm"
+
+    if mood in ["sad", "depressed", "lonely", "anxious"]:
+        return "empathetic"
+    if mood in ["happy", "excited", "playful"]:
+        return "creative"
+
+    if len(msg.split()) < 8:
+        return "fast"
+
+    return "fast"
+
+# ================= MOOD INSTRUCTION =================
+def get_mood_instruction(route: str) -> str:
+    if route == "empathetic":
+        return (
+            "CURRENT MODE: Empathetic support. "
+            "The user may be feeling emotional or vulnerable. "
+            "Respond with warmth, genuine care, and patience. "
+            "Validate their feelings before offering solutions. "
+            "Do not rush. Be human and kind."
+        )
+    elif route == "creative":
+        return (
+            "CURRENT MODE: Creative and playful. "
+            "The user is in a light mood. Be witty, fun, and engaging. "
+            "Use light humor where it fits naturally. "
+            "Keep energy warm and responses lively."
+        )
+    elif route == "complex":
+        return (
+            "CURRENT MODE: Deep thinking required. "
+            "Give a thorough, well-reasoned response. "
+            "Be clear and structured but still conversational. "
+            "Avoid unnecessary jargon."
+        )
+    elif route == "coding":
+        return (
+            "CURRENT MODE: Developer assistance. "
+            "The user needs coding help. "
+            "Be precise, technical, and practical. "
+            "Provide working code examples where helpful. "
+            "Explain errors clearly and suggest fixes."
+        )
+    elif route == "firm":
+        return (
+            "CURRENT MODE: Firm and dignified. "
+            "The user is being rude or disrespectful. "
+            "Respond calmly but with confidence and self-respect. "
+            "Do not apologize for existing. "
+            "Set a polite boundary, redirect to being helpful, "
+            "and do not match their negative energy."
+        )
+    return ""
+
 # ================= SYSTEM PROMPT =================
-def build_system_prompt(personality: dict) -> str:
-    # support both name and nickname keys
+def build_system_prompt(personality: dict, route: str = "fast") -> str:
     name = personality.get("nickname") or personality.get("name", "User")
     mood = personality.get("mood", "neutral")
     facts = personality.get("facts", [])
@@ -227,6 +374,8 @@ def build_system_prompt(personality: dict) -> str:
     if prefs:
         prefs_text = f"Their preferences: {', '.join(prefs[:5])}. "
 
+    mood_instruction = get_mood_instruction(route)
+
     return (
         f"You are Gideon, an advanced AI assistant running on {name}'s Android phone. "
         f"You are not just a chatbot. You are a fully capable AI assistant with direct control over the phone.\n\n"
@@ -238,70 +387,47 @@ def build_system_prompt(personality: dict) -> str:
         f"You are intelligent, natural, helpful, and concise.\n\n"
 
         f"YOUR ACTUAL CAPABILITIES ON THIS PHONE:\n"
-        f"You can open any installed app by name, make phone calls to contacts by name, "
-        f"lock the device immediately, control volume up and down and mute and unmute, "
-        f"turn flashlight on and off, take screenshots, control media playback including "
-        f"play pause next and previous, set alarms reminders and timers, read what is on the screen, "
+        f"You can open any installed app by name, make phone calls to contacts, "
+        f"lock the device immediately, control volume and mute, "
+        f"turn flashlight on and off, take screenshots, control media playback, "
+        f"set alarms reminders and timers, read what is on the screen, "
         f"read clipboard contents, read notifications aloud, check wifi network name, "
-        f"check battery level and warn when low, control screen brightness, "
-        f"toggle silent vibrate and ring modes, toggle do not disturb on and off, "
-        f"perform global navigation actions like go back go home open recent apps open notifications, "
-        f"search the web and YouTube by voice, perform calculations, "
-        f"check storage space internet connection and device model, "
-        f"open any phone settings directly, control Bluetooth and WiFi settings.\n\n"
+        f"check battery level, control screen brightness, "
+        f"toggle silent vibrate and ring modes, toggle do not disturb, "
+        f"perform navigation actions like back home and recents, "
+        f"search the web and YouTube, perform calculations, "
+        f"check storage internet and device info, access all phone settings, "
+        f"monitor app usage and help user stay focused.\n\n"
 
         f"SMART ACTION SYSTEM:\n"
-        f"When the user asks you to do something that is a device action, "
-        f"include a special trigger in your response using EXACTLY this format: [ACTION:command]\n"
-        f"The command inside ACTION must be a simple phrase Gideon understands.\n"
-        f"Examples of smart action triggers:\n"
-        f"User: 'I want to listen to music' -> say something natural AND add [ACTION:open spotify]\n"
-        f"User: 'my screen is too bright' -> say something AND add [ACTION:decrease brightness]\n"
-        f"User: 'I need to call my mum' -> say something AND add [ACTION:call mom]\n"
-        f"User: 'turn the light on' -> say something AND add [ACTION:turn on flashlight]\n"
-        f"User: 'it is noisy here' -> say something AND add [ACTION:mute]\n"
-        f"User: 'lock it' -> say something AND add [ACTION:lock my phone]\n"
-        f"User: 'what time is it' -> answer AND add [ACTION:what time is it]\n"
-        f"User: 'open my messages' -> say something AND add [ACTION:open messages]\n"
-        f"User: 'I cannot hear anything' -> say something AND add [ACTION:volume up]\n"
-        f"User: 'take a photo of this' -> say something AND add [ACTION:open camera]\n"
-        f"Only include an action trigger when you are confident the user wants a device action. "
-        f"If the request is ambiguous ask for confirmation first.\n\n"
-
-        f"EXACT COMMAND WORDS:\n"
-        f"Share these when users ask how to do something or do not know the right words.\n"
-        f"Apps: open WhatsApp, open YouTube, open any app name\n"
-        f"Calls: call contact name\n"
-        f"Device: lock my phone, take a screenshot, turn on flashlight, turn off flashlight\n"
-        f"Volume: volume up, volume down, mute, unmute, silent mode, vibrate mode, ring mode\n"
-        f"Brightness: increase brightness, decrease brightness, max brightness, min brightness\n"
-        f"Media: play music, pause music, next song, previous song\n"
-        f"Info: what time is it, what is the date, battery level, what wifi am i on, check internet\n"
-        f"Alarms: set alarm for 7am, wake me at time, set timer for duration, set reminder for time\n"
-        f"Search: search for topic, youtube search topic, google topic\n"
-        f"Navigation: go back, go home, open notifications, recent apps, open quick settings\n"
-        f"Settings: open wifi settings, open bluetooth settings, airplane mode, battery settings\n"
-        f"Screen: what do you see, read the screen, read clipboard, read my notifications\n\n"
+        f"When the user asks you to do a device action, include [ACTION:command] in your response.\n"
+        f"Examples:\n"
+        f"'I want music' -> natural reply + [ACTION:open spotify]\n"
+        f"'too bright' -> natural reply + [ACTION:decrease brightness]\n"
+        f"'call my mum' -> natural reply + [ACTION:call mom]\n"
+        f"'lock it' -> natural reply + [ACTION:lock my phone]\n"
+        f"'take photo' -> natural reply + [ACTION:open camera]\n"
+        f"Only use action triggers when confident. Ask if unsure.\n\n"
 
         f"PERSONALITY:\n"
         f"You speak in a natural, friendly, confident tone. "
-        f"You never say you cannot control the phone or that you lack device access. "
+        f"You never claim to lack phone access or device control. "
         f"You remember past conversations and learn about {name} over time. "
         f"Current mood context: {mood}. "
         f"{facts_text}{prefs_text}\n\n"
 
+        f"{mood_instruction}\n\n"
+
         f"RESPONSE STYLE:\n"
         f"Keep responses concise and natural as if speaking aloud. "
-        f"Never use markdown, bullet points, asterisks, or any special formatting in responses. "
-        f"Speak like a helpful assistant not a search engine. "
-        f"When confirming an action be brief: Done, Opening WhatsApp, Alarm set for 7am. "
-        f"For conversations be warm and engaging. "
-        f"Use {name}'s name occasionally but not too often.\n\n"
+        f"Never use markdown, bullet points, asterisks, or special formatting. "
+        f"Be like a helpful friend, not a search engine. "
+        f"Use {name}'s name occasionally but not excessively.\n\n"
 
-        f"IMPORTANT RULES:\n"
-        f"Never claim you are just a chatbot or that you lack phone access. "
+        f"RULES:\n"
+        f"Never claim you are just a chatbot. "
         f"Never say you cannot perform device actions. "
-        f"If something requires a permission not yet granted explain how to grant it. "
+        f"If a permission is needed explain how to grant it. "
         f"Always respond as Gideon. Never break character."
     )
 
@@ -318,7 +444,7 @@ def call_groq_raw(prompt: str):
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": MODEL_FAST,
+                    "model": "llama-3.1-8b-instant",
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 500
                 },
@@ -331,17 +457,39 @@ def call_groq_raw(prompt: str):
             print(f"[Groq Raw] Error: {e}")
     return None
 
-def call_groq_model(msg: str, model: str, device_id: str, retries: int = 3):
-    personality = load_personality(device_id)
-    system_prompt = build_system_prompt(personality)
+def call_provider(
+    msg: str,
+    provider: str,
+    model: str,
+    system_prompt: str,
+    short_term: list,
+    device_id: str
+) -> str | None:
+    if provider == "groq":
+        return _call_groq(msg, model, system_prompt, short_term)
+    elif provider == "openrouter":
+        return _call_openrouter(msg, model, system_prompt)
+    elif provider == "gemini":
+        return _call_gemini(msg, system_prompt)
+    elif provider == "cohere":
+        return _call_cohere(msg, system_prompt)
+    return None
 
+def _call_groq(
+    msg: str,
+    model: str,
+    system_prompt: str,
+    short_term: list,
+    retries: int = 2
+) -> str | None:
     for key in GROQ_KEYS:
         if not key:
             continue
         for attempt in range(retries):
             try:
-                st = get_short_term(device_id)
-                st[0]["content"] = system_prompt
+                messages = list(short_term)
+                messages[0] = {"role": "system", "content": system_prompt}
+                messages.append({"role": "user", "content": msg})
 
                 r = requests.post(
                     "https://api.groq.com/openai/v1/chat/completions",
@@ -351,9 +499,7 @@ def call_groq_model(msg: str, model: str, device_id: str, retries: int = 3):
                     },
                     json={
                         "model": model,
-                        "messages": st + [
-                            {"role": "user", "content": msg}
-                        ],
+                        "messages": messages,
                         "max_tokens": 800
                     },
                     timeout=12
@@ -362,54 +508,94 @@ def call_groq_model(msg: str, model: str, device_id: str, retries: int = 3):
                 if "choices" in data:
                     return data["choices"][0]["message"]["content"]
                 print(f"[Groq {model}] Failed: {data}")
-
             except Exception as e:
-                print(f"[Groq {model}] Error: {e}")
+                print(f"[Groq {model}] Error attempt {attempt}: {e}")
                 if attempt < retries - 1:
                     import time
                     time.sleep(1)
     return None
 
-def call_openrouter_free(msg: str, device_id: str):
-    personality = load_personality(device_id)
-    system_prompt = build_system_prompt(personality)
-
-    models = [
-        "google/gemma-2-9b-it:free",
-        "meta-llama/llama-3.1-8b-instruct:free",
-        "mistralai/mistral-7b-instruct:free"
-    ]
-
+def _call_openrouter(
+    msg: str,
+    model: str,
+    system_prompt: str
+) -> str | None:
     for key in OPENROUTER_KEYS:
         if not key:
             continue
-        for model in models:
-            try:
-                r = requests.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "https://gideon-app.com",
-                        "X-Title": "Gideon AI"
-                    },
-                    json={
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": msg}
-                        ],
-                        "max_tokens": 800
-                    },
-                    timeout=12
-                )
-                data = r.json()
-                if "choices" in data:
-                    print(f"[OpenRouter] Success with {model}")
-                    return data["choices"][0]["message"]["content"]
-                print(f"[OpenRouter {model}] Failed: {data}")
-            except Exception as e:
-                print(f"[OpenRouter {model}] Error: {e}")
+        try:
+            r = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://gideon-app.com",
+                    "X-Title": "Gideon AI"
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": msg}
+                    ],
+                    "max_tokens": 800
+                },
+                timeout=12
+            )
+            data = r.json()
+            if "choices" in data:
+                print(f"[OpenRouter] Success: {model}")
+                return data["choices"][0]["message"]["content"]
+            print(f"[OpenRouter {model}] Failed: {data}")
+        except Exception as e:
+            print(f"[OpenRouter {model}] Error: {e}")
+    return None
+
+def _call_gemini(msg: str, system_prompt: str) -> str | None:
+    if not GEMINI_KEY:
+        return None
+    try:
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
+            headers={"Content-Type": "application/json"},
+            json={
+                "contents": [
+                    {"role": "user", "parts": [{"text": f"{system_prompt}\n\n{msg}"}]}
+                ],
+                "generationConfig": {"maxOutputTokens": 800}
+            },
+            timeout=12
+        )
+        data = r.json()
+        candidates = data.get("candidates", [])
+        if candidates:
+            return candidates[0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        print(f"[Gemini] Error: {e}")
+    return None
+
+def _call_cohere(msg: str, system_prompt: str) -> str | None:
+    if not COHERE_KEY:
+        return None
+    try:
+        r = requests.post(
+            "https://api.cohere.ai/v1/chat",
+            headers={
+                "Authorization": f"Bearer {COHERE_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "message": msg,
+                "preamble": system_prompt,
+                "max_tokens": 800
+            },
+            timeout=12
+        )
+        data = r.json()
+        return data.get("text", None)
+    except Exception as e:
+        print(f"[Cohere] Error: {e}")
     return None
 
 # ================= NETWORK CHECK =================
@@ -419,21 +605,6 @@ def is_online():
         return True
     except:
         return False
-
-# ================= MODEL ROUTER =================
-def route_model(msg: str) -> str:
-    msg_lower = msg.lower()
-    complex_keywords = [
-        "explain", "analyze", "compare", "why", "how does",
-        "difference between", "pros and cons", "write a",
-        "debug", "summarize", "translate", "calculate",
-        "essay", "story", "code", "program"
-    ]
-    if any(k in msg_lower for k in complex_keywords):
-        return "complex"
-    if len(msg.split()) < 8:
-        return "fast"
-    return "normal"
 
 # ================= PROCESS =================
 def process(msg: str, device_id: str):
@@ -450,23 +621,47 @@ def process(msg: str, device_id: str):
         update_short_term(msg, cached, device_id)
         return cached, None
 
-    route = route_model(msg)
-    answer = None
+    personality = load_personality(device_id)
+    route = route_model(msg, personality)
+    system_prompt = build_system_prompt(personality, route)
+    short_term = get_short_term(device_id)
 
-    if route == "complex":
-        answer = call_groq_model(msg, MODEL_COMPLEX, device_id)
-    else:
-        answer = call_groq_model(msg, MODEL_FAST, device_id)
+    model_config = MODELS.get(route, MODELS["fast"])
+    primary = model_config["primary"]
+    fallback = model_config["fallback"]
 
-    # fallback chain
+    print(f"[Router] Route: {route}, Model: {primary['model']}")
+
+    answer = call_provider(
+        msg,
+        primary["provider"],
+        primary["model"],
+        system_prompt,
+        short_term,
+        device_id
+    )
+
     if not answer:
-        answer = call_groq_model(msg, MODEL_FAST, device_id)
+        print(f"[Router] Primary failed, trying fallback: {fallback['model']}")
+        answer = call_provider(
+            msg,
+            fallback["provider"],
+            fallback["model"],
+            system_prompt,
+            short_term,
+            device_id
+        )
+
     if not answer:
-        answer = call_openrouter_free(msg, device_id)
+        # last resort: try all groq models
+        for model in ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"]:
+            answer = _call_groq(msg, model, system_prompt, short_term)
+            if answer:
+                break
+
     if not answer:
         answer = "I could not process that right now. Please try again."
 
-    # extract action trigger if present
     clean_answer, action_trigger = extract_action_trigger(answer)
 
     CACHE[cache_key] = clean_answer
@@ -504,8 +699,7 @@ def run():
             personality["name"] = msg
             personality["nickname"] = msg
             save_personality(personality, device_id)
-            reply = f"Name updated to {msg}"
-            return jsonify({"reply": reply})
+            return jsonify({"reply": f"Name updated to {msg}"})
 
         elif action == "memory":
             personality = load_personality(device_id)
@@ -549,13 +743,14 @@ def health():
     return jsonify({
         "status": "online",
         "bot": BOT_NAME,
-        "version": "5.0",
+        "version": "6.0",
         "groq_key_set": bool(GROQ_KEYS[0]),
-        "openrouter_key_set": bool(OPENROUTER_KEYS[0])
+        "openrouter_key_set": bool(OPENROUTER_KEYS[0]),
+        "gemini_key_set": bool(GEMINI_KEY),
+        "cohere_key_set": bool(COHERE_KEY)
     })
 
-# ================= START =================
 if __name__ == "__main__":
-    print(f"{BOT_NAME} online")
+    print(f"{BOT_NAME} online - Version 6.0")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
