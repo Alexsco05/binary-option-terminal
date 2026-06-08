@@ -289,6 +289,7 @@ def route_model(msg: str, personality: dict) -> str:
 ]
 if any(k in msg_lower for k in math_keywords):
     return "math"
+
     emotional_keywords = [
         "sad", "depressed", "anxious", "lonely", "stressed",
         "worried", "scared", "angry", "upset", "hurt",
