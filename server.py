@@ -254,6 +254,59 @@ def extract_action_trigger(reply: str):
         return clean, action
     return reply, None
 
+OFFLINE_COMMANDS = {
+    "open": ["open", "launch", "start"],
+    "call": ["call", "dial", "phone"],
+    "alarm": ["set alarm", "wake me", "alarm for"],
+    "timer": ["set timer", "timer for", "countdown"],
+    "reminder": ["remind me", "set reminder"],
+    "volume": ["volume up", "volume down", "mute", "unmute"],
+    "brightness": ["increase brightness", "decrease brightness",
+                   "max brightness", "min brightness"],
+    "flashlight": ["turn on flashlight", "turn off flashlight",
+                   "flashlight on", "flashlight off"],
+    "lock": ["lock my phone", "lock device", "lock screen"],
+    "screenshot": ["take screenshot", "screenshot"],
+    "battery": ["battery level", "battery percentage"],
+    "time": ["what time", "current time"],
+    "date": ["what date", "today's date"],
+    "wifi": ["wifi settings", "turn on wifi", "turn off wifi"],
+    "bluetooth": ["bluetooth settings", "bluetooth on", "bluetooth off"],
+    "silent": ["silent mode", "vibrate mode", "ring mode"],
+    "dnd": ["do not disturb", "dnd on", "dnd off"],
+    "tasks": ["show tasks", "my tasks", "add task", "complete task"],
+    "screen": ["read my screen", "what do you see", "what's on my screen"],
+    "back": ["go back"],
+    "home": ["go home"],
+    "recents": ["recent apps", "open recent"],
+    "notifications": ["open notifications"],
+    "settings": ["open settings", "open wifi settings",
+                 "open bluetooth settings"],
+    "search": ["search for", "google", "youtube search"],
+    "calculate": ["calculate", "what is", "plus", "minus", "times",
+                  "divided by"],
+    "clipboard": ["read clipboard", "what did i copy"],
+    "storage": ["how much storage", "storage space"],
+    "internet": ["check internet", "am i connected"],
+    "phone_info": ["what phone", "phone model"],
+    "media_play": ["play music"],
+    "media_pause": ["pause music", "pause that"],
+    "media_next": ["next song", "skip"],
+    "strict_mode": ["strict mode", "focus mode", "discipline mode"],
+    "study_mode": ["study mode", "start studying"],
+    "sleep_mode": ["sleep mode", "good night", "bedtime"],
+    "work_mode": ["work mode", "start work"],
+    "morning": ["morning routine", "start my day"],
+}
+
+def detect_offline_command(msg: str) -> str | None:
+    """Detect if message matches an offline command pattern."""
+    msg_lower = msg.lower().strip()
+    for cmd_type, patterns in OFFLINE_COMMANDS.items():
+        for pattern in patterns:
+            if pattern in msg_lower:
+                return cmd_type
+    return None
 # ================= MODEL ROUTER =================
 def route_model(msg: str, personality: dict) -> str:
     msg_lower = msg.lower()
@@ -620,6 +673,19 @@ def process(msg: str, device_id: str):
         cached = CACHE[cache_key]
         update_short_term(msg, cached, device_id)
         return cached, None
+
+# detect if this should be an offline command
+offline_type = detect_offline_command(msg)
+if offline_type:
+    # return with action trigger so Android executes it
+    clean_msg = msg
+    action_trigger = msg  # send the raw message as action trigger
+    # still get AI to respond naturally
+    answer = call_groq_model(msg, MODEL_FAST, device_id)
+    if answer:
+        clean_answer, _ = extract_action_trigger(answer)
+        return clean_answer, action_trigger
+
 
     personality = load_personality(device_id)
     route = route_model(msg, personality)
