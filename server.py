@@ -674,18 +674,20 @@ def process(msg: str, device_id: str):
         update_short_term(msg, cached, device_id)
         return cached, None
 
-# detect if this should be an offline command
-offline_type = detect_offline_command(msg)
-if offline_type:
-    # return with action trigger so Android executes it
-    clean_msg = msg
-    action_trigger = msg  # send the raw message as action trigger
-    # still get AI to respond naturally
-    answer = call_groq_model(msg, MODEL_FAST, device_id)
-    if answer:
-        clean_answer, _ = extract_action_trigger(answer)
-        return clean_answer, action_trigger
-
+    # detect if this should trigger an offline command on Android
+    offline_type = detect_offline_command(msg)
+    if offline_type:
+        personality = load_personality(device_id)
+        system_prompt = build_system_prompt(personality, "fast")
+        short_term = get_short_term(device_id)
+        answer = _call_groq(
+            msg, "llama-3.1-8b-instant", system_prompt, short_term
+        )
+        if answer:
+            clean_answer, _ = extract_action_trigger(answer)
+            update_short_term(msg, clean_answer, device_id)
+            return clean_answer, msg
+        return "Done.", msg
 
     personality = load_personality(device_id)
     route = route_model(msg, personality)
@@ -708,7 +710,7 @@ if offline_type:
     )
 
     if not answer:
-        print(f"[Router] Primary failed, trying fallback: {fallback['model']}")
+        print(f"[Router] Primary failed, trying: {fallback['model']}")
         answer = call_provider(
             msg,
             fallback["provider"],
@@ -719,7 +721,6 @@ if offline_type:
         )
 
     if not answer:
-        # last resort: try all groq models
         for model in ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"]:
             answer = _call_groq(msg, model, system_prompt, short_term)
             if answer:
