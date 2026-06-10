@@ -49,7 +49,7 @@ MODELS = {
     },
     "complex": {
         "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-        "fallback": {"provider": "openrouter", "model": "google/gemma-2-9b-it:free"}
+        "fallback": {"provider": "gemini", "model": "gemini-1.5-flash"}
     },
     "creative": {
         "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
@@ -57,7 +57,7 @@ MODELS = {
     },
     "empathetic": {
         "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-        "fallback": {"provider": "openrouter", "model": "google/gemma-2-9b-it:free"}
+        "fallback": {"provider": "cohere", "model": "command-r"}
     },
     "firm": {
         "primary": {"provider": "groq", "model": "llama-3.1-8b-instant"},
@@ -68,12 +68,20 @@ MODELS = {
         "fallback": {"provider": "groq", "model": "llama-3.3-70b-versatile"}
     },
     "vision": {
-        "primary": {"provider": "openrouter", "model": "google/gemma-3-12b-it:free"},
+        "primary": {"provider": "gemini", "model": "gemini-1.5-flash"},
         "fallback": {"provider": "groq", "model": "llama-3.1-8b-instant"}
     },
     "coding": {
         "primary": {"provider": "openrouter", "model": "deepseek/deepseek-coder:free"},
         "fallback": {"provider": "groq", "model": "llama-3.3-70b-versatile"}
+    },
+    "weather": {
+        "primary": {"provider": "groq", "model": "llama-3.1-8b-instant"},
+        "fallback": {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"}
+    },
+    "news": {
+        "primary": {"provider": "groq", "model": "llama-3.1-8b-instant"},
+        "fallback": {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"}
     }
 }
 
@@ -254,48 +262,84 @@ def extract_action_trigger(reply: str):
         return clean, action
     return reply, None
 
-OFFLINE_COMMAND_ACTIONS = {
-    "open": "open {app}",
-    "call": "call {contact}",
-    "alarm": "set alarm",
-    "timer": "set timer",
-    "screenshot": "take screenshot",
-    "lock": "lock my phone",
-    "flashlight": "flashlight on",
-    "volume": "volume up",
-    "brightness": "increase brightness",
-    "silent": "silent mode",
-    "wifi": "wifi settings",
-    "bluetooth": "bluetooth settings",
-    "battery": "battery level",
-    "tasks": "show my tasks",
-    "screen": "read my screen",
-    "back": "go back",
-    "home": "go home",
-    "recents": "recent apps",
-    "search": "search for",
-    "media_play": "play music",
-    "media_pause": "pause music",
-    "media_next": "next song",
+
+# ================= OFFLINE COMMAND DETECTION =================
+OFFLINE_COMMANDS = {
+    "open": ["open", "launch", "start"],
+    "call": ["call", "dial"],
+    "alarm": ["set alarm", "wake me", "alarm for"],
+    "timer": ["set timer", "timer for", "countdown"],
+    "reminder": ["remind me", "set reminder"],
+    "volume": ["volume up", "volume down", "mute", "unmute",
+               "max volume", "min volume", "full volume"],
+    "brightness": ["increase brightness", "decrease brightness",
+                   "max brightness", "min brightness", "brightest", "dimmest"],
+    "flashlight": ["turn on flashlight", "turn off flashlight",
+                   "flashlight on", "flashlight off"],
+    "lock": ["lock my phone", "lock device", "lock screen", "lock it"],
+    "screenshot": ["take screenshot", "screenshot"],
+    "battery": ["battery level", "battery percentage", "how much battery"],
+    "time": ["what time", "current time", "what is the time"],
+    "date": ["what date", "today's date", "what is today"],
+    "wifi": ["wifi settings", "turn on wifi", "turn off wifi",
+             "wifi on", "wifi off"],
+    "bluetooth": ["bluetooth settings", "bluetooth on", "bluetooth off",
+                  "turn on bluetooth", "turn off bluetooth"],
+    "silent": ["silent mode", "vibrate mode", "ring mode", "mute phone"],
+    "dnd": ["do not disturb", "dnd on", "dnd off"],
+    "tasks": ["show tasks", "my tasks", "add task",
+              "complete task", "show my tasks"],
+    "screen": ["read my screen", "what do you see",
+               "what's on my screen", "what is on my screen"],
+    "back": ["go back"],
+    "home": ["go home", "home screen"],
+    "recents": ["recent apps", "open recent"],
+    "notifications": ["open notifications", "read my notifications"],
+    "settings": ["open settings", "open wifi settings",
+                 "open bluetooth settings"],
+    "search": ["search for", "google", "youtube search", "search on youtube"],
+    "calculate": ["calculate", "what is", "plus", "minus",
+                  "times", "divided by"],
+    "clipboard": ["read clipboard", "what did i copy"],
+    "storage": ["how much storage", "storage space"],
+    "internet": ["check internet", "am i connected", "internet status"],
+    "phone_info": ["what phone", "phone model", "device info"],
+    "media_play": ["play music", "play song"],
+    "media_pause": ["pause music", "pause that", "stop music"],
+    "media_next": ["next song", "skip song", "skip"],
+    "strict_mode": ["strict mode", "focus mode", "discipline mode"],
+    "study_mode": ["study mode", "start studying"],
+    "sleep_mode": ["sleep mode", "good night", "bedtime"],
+    "work_mode": ["work mode", "start work"],
+    "morning": ["morning routine", "start my day"],
 }
 
+def detect_offline_command(msg: str):
+    """Detect if message matches an offline command pattern."""
+    msg_lower = msg.lower().strip()
+    for cmd_type, patterns in OFFLINE_COMMANDS.items():
+        for pattern in patterns:
+            if pattern in msg_lower:
+                return cmd_type
+    return None
+
+
+# ================= ACTION TRIGGER BUILDER =================
 def build_action_trigger(offline_type: str, msg: str) -> str:
-    """Build a clean action trigger command from the offline type and message."""
-    msg_lower = msg.lower()
+    """Build a clean action trigger command the Android app can execute."""
+    msg_lower = msg.lower().strip()
 
     if offline_type == "open":
-        # extract app name
         for word in ["open", "launch", "start"]:
             if word in msg_lower:
                 app = msg_lower.replace(word, "").strip()
-                # clean common words
                 app = app.replace("the", "").replace("app", "").strip()
                 if app:
                     return f"open {app}"
         return "open"
 
     if offline_type == "call":
-        for word in ["call", "dial", "phone"]:
+        for word in ["call", "dial"]:
             if word in msg_lower:
                 contact = msg_lower.replace(word, "").strip()
                 if contact:
@@ -310,13 +354,20 @@ def build_action_trigger(offline_type: str, msg: str) -> str:
                     return f"search for {query}"
         return msg_lower
 
-    # for most commands just return the matching pattern directly
+    if offline_type == "alarm":
+        return msg_lower
+
+    if offline_type == "timer":
+        return msg_lower
+
+    if offline_type == "tasks":
+        return msg_lower
+
     action_map = {
         "lock": "lock my phone",
         "screenshot": "take screenshot",
         "flashlight": "flashlight on",
         "battery": "battery level",
-        "tasks": "show my tasks",
         "screen": "read my screen",
         "back": "go back",
         "home": "go home",
@@ -327,6 +378,23 @@ def build_action_trigger(offline_type: str, msg: str) -> str:
         "silent": "silent mode",
         "wifi": "wifi settings",
         "bluetooth": "bluetooth settings",
+        "dnd": "do not disturb on",
+        "notifications": "open notifications",
+        "storage": "how much storage",
+        "internet": "check internet",
+        "phone_info": "what phone do i have",
+        "time": "what time is it",
+        "date": "what date is it",
+        "clipboard": "read clipboard",
+        "strict_mode": msg_lower,
+        "study_mode": "study mode",
+        "sleep_mode": "sleep mode",
+        "work_mode": "work mode",
+        "morning": "morning routine",
+        "volume": msg_lower,
+        "brightness": msg_lower,
+        "settings": msg_lower,
+        "calculate": msg_lower,
     }
 
     return action_map.get(offline_type, msg_lower)
