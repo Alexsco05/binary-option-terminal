@@ -254,59 +254,83 @@ def extract_action_trigger(reply: str):
         return clean, action
     return reply, None
 
-OFFLINE_COMMANDS = {
-    "open": ["open", "launch", "start"],
-    "call": ["call", "dial", "phone"],
-    "alarm": ["set alarm", "wake me", "alarm for"],
-    "timer": ["set timer", "timer for", "countdown"],
-    "reminder": ["remind me", "set reminder"],
-    "volume": ["volume up", "volume down", "mute", "unmute"],
-    "brightness": ["increase brightness", "decrease brightness",
-                   "max brightness", "min brightness"],
-    "flashlight": ["turn on flashlight", "turn off flashlight",
-                   "flashlight on", "flashlight off"],
-    "lock": ["lock my phone", "lock device", "lock screen"],
-    "screenshot": ["take screenshot", "screenshot"],
-    "battery": ["battery level", "battery percentage"],
-    "time": ["what time", "current time"],
-    "date": ["what date", "today's date"],
-    "wifi": ["wifi settings", "turn on wifi", "turn off wifi"],
-    "bluetooth": ["bluetooth settings", "bluetooth on", "bluetooth off"],
-    "silent": ["silent mode", "vibrate mode", "ring mode"],
-    "dnd": ["do not disturb", "dnd on", "dnd off"],
-    "tasks": ["show tasks", "my tasks", "add task", "complete task"],
-    "screen": ["read my screen", "what do you see", "what's on my screen"],
-    "back": ["go back"],
-    "home": ["go home"],
-    "recents": ["recent apps", "open recent"],
-    "notifications": ["open notifications"],
-    "settings": ["open settings", "open wifi settings",
-                 "open bluetooth settings"],
-    "search": ["search for", "google", "youtube search"],
-    "calculate": ["calculate", "what is", "plus", "minus", "times",
-                  "divided by"],
-    "clipboard": ["read clipboard", "what did i copy"],
-    "storage": ["how much storage", "storage space"],
-    "internet": ["check internet", "am i connected"],
-    "phone_info": ["what phone", "phone model"],
-    "media_play": ["play music"],
-    "media_pause": ["pause music", "pause that"],
-    "media_next": ["next song", "skip"],
-    "strict_mode": ["strict mode", "focus mode", "discipline mode"],
-    "study_mode": ["study mode", "start studying"],
-    "sleep_mode": ["sleep mode", "good night", "bedtime"],
-    "work_mode": ["work mode", "start work"],
-    "morning": ["morning routine", "start my day"],
+OFFLINE_COMMAND_ACTIONS = {
+    "open": "open {app}",
+    "call": "call {contact}",
+    "alarm": "set alarm",
+    "timer": "set timer",
+    "screenshot": "take screenshot",
+    "lock": "lock my phone",
+    "flashlight": "flashlight on",
+    "volume": "volume up",
+    "brightness": "increase brightness",
+    "silent": "silent mode",
+    "wifi": "wifi settings",
+    "bluetooth": "bluetooth settings",
+    "battery": "battery level",
+    "tasks": "show my tasks",
+    "screen": "read my screen",
+    "back": "go back",
+    "home": "go home",
+    "recents": "recent apps",
+    "search": "search for",
+    "media_play": "play music",
+    "media_pause": "pause music",
+    "media_next": "next song",
 }
 
-def detect_offline_command(msg: str) -> str | None:
-    """Detect if message matches an offline command pattern."""
-    msg_lower = msg.lower().strip()
-    for cmd_type, patterns in OFFLINE_COMMANDS.items():
-        for pattern in patterns:
-            if pattern in msg_lower:
-                return cmd_type
-    return None
+def build_action_trigger(offline_type: str, msg: str) -> str:
+    """Build a clean action trigger command from the offline type and message."""
+    msg_lower = msg.lower()
+
+    if offline_type == "open":
+        # extract app name
+        for word in ["open", "launch", "start"]:
+            if word in msg_lower:
+                app = msg_lower.replace(word, "").strip()
+                # clean common words
+                app = app.replace("the", "").replace("app", "").strip()
+                if app:
+                    return f"open {app}"
+        return "open"
+
+    if offline_type == "call":
+        for word in ["call", "dial", "phone"]:
+            if word in msg_lower:
+                contact = msg_lower.replace(word, "").strip()
+                if contact:
+                    return f"call {contact}"
+        return "call"
+
+    if offline_type == "search":
+        for word in ["search for", "google", "search"]:
+            if word in msg_lower:
+                query = msg_lower.replace(word, "").strip()
+                if query:
+                    return f"search for {query}"
+        return msg_lower
+
+    # for most commands just return the matching pattern directly
+    action_map = {
+        "lock": "lock my phone",
+        "screenshot": "take screenshot",
+        "flashlight": "flashlight on",
+        "battery": "battery level",
+        "tasks": "show my tasks",
+        "screen": "read my screen",
+        "back": "go back",
+        "home": "go home",
+        "recents": "recent apps",
+        "media_play": "play music",
+        "media_pause": "pause music",
+        "media_next": "next song",
+        "silent": "silent mode",
+        "wifi": "wifi settings",
+        "bluetooth": "bluetooth settings",
+    }
+
+    return action_map.get(offline_type, msg_lower)
+
 # ================= MODEL ROUTER =================
 def route_model(msg: str, personality: dict) -> str:
     msg_lower = msg.lower()
@@ -680,14 +704,21 @@ def process(msg: str, device_id: str):
         personality = load_personality(device_id)
         system_prompt = build_system_prompt(personality, "fast")
         short_term = get_short_term(device_id)
+
+        # build a clean action trigger
+        action_trigger = build_action_trigger(offline_type, msg)
+
+        # get AI to respond naturally about what it is doing
         answer = _call_groq(
             msg, "llama-3.1-8b-instant", system_prompt, short_term
         )
+
         if answer:
             clean_answer, _ = extract_action_trigger(answer)
             update_short_term(msg, clean_answer, device_id)
-            return clean_answer, msg
-        return "Done.", msg
+            return clean_answer, action_trigger
+
+        return "On it.", action_trigger
 
     personality = load_personality(device_id)
     route = route_model(msg, personality)
