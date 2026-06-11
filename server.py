@@ -1,6 +1,6 @@
 # ================= GIDEON BACKEND =================
 # Creator: Alexsco (Adegolu Alex)
-# Version: 6.0 - Multi-Model Brain
+# Version: 7.0 - Intent-First Brain
 
 from flask import Flask, request, jsonify
 import os
@@ -17,35 +17,27 @@ BOT_NAME = "Gideon"
 
 GROQ_KEYS = [
     os.getenv("GROQ_KEY_1", ""),
-    os.getenv("GROQ_KEY_2", "")
+    os.getenv("GROQ_KEY_2", ""),
+    os.getenv("GROQ_KEY_3", ""),
+    os.getenv("GROQ_KEY_4", ""),
 ]
 
 OPENROUTER_KEYS = [
     os.getenv("OPENROUTER_KEY_1", ""),
-    os.getenv("OPENROUTER_KEY_2", "")
+    os.getenv("OPENROUTER_KEY_2", ""),
 ]
 
-GEMINI_KEY = [
-    os.getenv("GEMINI_KEY_1", ""),
-    os.getenv("GEMINI_KEY_2", "")
-]
+GEMINI_KEY = os.getenv("GEMINI_KEY", "")
+COHERE_KEY = os.getenv("COHERE_KEY", "")
+WEATHER_KEY = os.getenv("WEATHER_KEY", "")
+NEWS_KEY = os.getenv("NEWS_KEY", "")
 
-MISTRAL_KEY = [ 
-    os.getenv("MISTRAL_KEY_1", ""),
-    os.getenv("MISTRAL_KEY_2", "")
-]
-
-COHERE_KEY = [ 
-    os.getenv("COHERE_KEY_1", ""),
-    os.getenv("COHERE_KEY_2", "")
-]
-
-# ─── MODEL REGISTRY ───────────────────────────────
-# Each task type has a primary and fallback model
+# ================= MODEL REGISTRY =================
 MODELS = {
     "fast": {
         "primary": {"provider": "groq", "model": "llama-3.1-8b-instant"},
-        "fallback": {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"}
+        "fallback": {"provider": "openrouter",
+                     "model": "meta-llama/llama-3.1-8b-instruct:free"}
     },
     "complex": {
         "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
@@ -53,7 +45,8 @@ MODELS = {
     },
     "creative": {
         "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-        "fallback": {"provider": "openrouter", "model": "mistralai/mistral-7b-instruct:free"}
+        "fallback": {"provider": "openrouter",
+                     "model": "mistralai/mistral-7b-instruct:free"}
     },
     "empathetic": {
         "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
@@ -61,10 +54,12 @@ MODELS = {
     },
     "firm": {
         "primary": {"provider": "groq", "model": "llama-3.1-8b-instant"},
-        "fallback": {"provider": "openrouter", "model": "mistralai/mistral-7b-instruct:free"}
+        "fallback": {"provider": "openrouter",
+                     "model": "mistralai/mistral-7b-instruct:free"}
     },
     "math": {
-        "primary": {"provider": "openrouter", "model": "qwen/qwen-2-math-72b-instruct:free"},
+        "primary": {"provider": "openrouter",
+                    "model": "qwen/qwen-2-math-72b-instruct:free"},
         "fallback": {"provider": "groq", "model": "llama-3.3-70b-versatile"}
     },
     "vision": {
@@ -72,31 +67,36 @@ MODELS = {
         "fallback": {"provider": "groq", "model": "llama-3.1-8b-instant"}
     },
     "coding": {
-        "primary": {"provider": "openrouter", "model": "deepseek/deepseek-coder:free"},
+        "primary": {"provider": "openrouter",
+                    "model": "deepseek/deepseek-coder:free"},
         "fallback": {"provider": "groq", "model": "llama-3.3-70b-versatile"}
     },
     "weather": {
         "primary": {"provider": "groq", "model": "llama-3.1-8b-instant"},
-        "fallback": {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"}
+        "fallback": {"provider": "openrouter",
+                     "model": "meta-llama/llama-3.1-8b-instruct:free"}
     },
     "news": {
         "primary": {"provider": "groq", "model": "llama-3.1-8b-instant"},
-        "fallback": {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"}
-    }
+        "fallback": {"provider": "openrouter",
+                     "model": "meta-llama/llama-3.1-8b-instruct:free"}
+    },
 }
 
-# ================= CACHE =================
+# ================= CACHE AND MEMORY =================
 CACHE = {}
 USER_SHORT_TERM = {}
 MEMORY_LIMIT = 20
+PENDING_CONFIRMATIONS = {}
 
-# ================= SHORT TERM MEMORY =================
+
 def get_short_term(device_id: str):
     if device_id not in USER_SHORT_TERM:
         USER_SHORT_TERM[device_id] = [
             {"role": "system", "content": ""}
         ]
     return USER_SHORT_TERM[device_id]
+
 
 # ================= FILE PATHS =================
 def get_user_files(device_id: str):
@@ -108,14 +108,16 @@ def get_user_files(device_id: str):
         "history": f"history_{safe_id}.json"
     }
 
+
 # ================= HISTORY =================
 def load_history(device_id: str):
     try:
         path = get_user_files(device_id)["history"]
         with open(path, "r") as f:
             return json.load(f)
-    except:
+    except Exception:
         return []
+
 
 def save_history(history: list, device_id: str):
     try:
@@ -125,13 +127,14 @@ def save_history(history: list, device_id: str):
     except Exception as e:
         print(f"[Memory] Failed to save history: {e}")
 
+
 # ================= PERSONALITY =================
 def load_personality(device_id: str):
     try:
         path = get_user_files(device_id)["personality"]
         with open(path, "r") as f:
             return json.load(f)
-    except:
+    except Exception:
         return {
             "name": "User",
             "nickname": "User",
@@ -144,6 +147,7 @@ def load_personality(device_id: str):
             "last_seen": ""
         }
 
+
 def save_personality(data: dict, device_id: str):
     try:
         path = get_user_files(device_id)["personality"]
@@ -152,6 +156,7 @@ def save_personality(data: dict, device_id: str):
     except Exception as e:
         print(f"[Memory] Failed to save personality: {e}")
 
+
 # ================= MEMORY UPDATES =================
 def update_short_term(user_msg: str, bot_reply: str, device_id: str):
     st = get_short_term(device_id)
@@ -159,6 +164,7 @@ def update_short_term(user_msg: str, bot_reply: str, device_id: str):
     st.append({"role": "assistant", "content": bot_reply})
     while len(st) > MEMORY_LIMIT:
         del st[1]
+
 
 def update_long_term(user_msg: str, bot_reply: str, device_id: str):
     history = load_history(device_id)
@@ -170,6 +176,7 @@ def update_long_term(user_msg: str, bot_reply: str, device_id: str):
     if len(history) > 100:
         history = summarize_history(history, device_id)
     save_history(history, device_id)
+
 
 def summarize_history(history: list, device_id: str):
     try:
@@ -192,6 +199,7 @@ def summarize_history(history: list, device_id: str):
         print(f"[Memory] Summarization failed: {e}")
     return history[-40:]
 
+
 # ================= FACT EXTRACTION =================
 def extract_facts(user_msg: str, device_id: str):
     threading.Thread(
@@ -199,6 +207,7 @@ def extract_facts(user_msg: str, device_id: str):
         args=(user_msg, device_id),
         daemon=True
     ).start()
+
 
 def _extract_facts_thread(user_msg: str, device_id: str):
     try:
@@ -212,7 +221,7 @@ def _extract_facts_thread(user_msg: str, device_id: str):
             f"Each key except mood is a list of short strings. "
             f"mood is a single word like happy, sad, neutral, excited. "
             f"If nothing to extract return exactly: "
-            f'{{\"facts\": [], \"preferences\": [], \"people\": [], \"locations\": [], \"mood\": \"neutral\"}} '
+            f'{{"facts":[],"preferences":[],"people":[],"locations":[],"mood":"neutral"}} '
             f"Message: {user_msg}"
         )
 
@@ -252,6 +261,7 @@ def _extract_facts_thread(user_msg: str, device_id: str):
     except Exception as e:
         print(f"[Memory] Fact extraction failed: {e}")
 
+
 # ================= ACTION TRIGGER PARSER =================
 def extract_action_trigger(reply: str):
     pattern = r'\[ACTION:([^\]]+)\]'
@@ -264,65 +274,79 @@ def extract_action_trigger(reply: str):
 
 
 # ================= OFFLINE COMMAND DETECTION =================
+# IMPORTANT: patterns use full phrases with spaces to prevent
+# false matches. "what's happening" should NOT match "what is"
 OFFLINE_COMMANDS = {
-    "open": ["open ", "launch ", "start "],  # note trailing space
-    "call": ["call ", "dial "],
-    "alarm": ["set alarm", "wake me up", "alarm for"],
-    "timer": ["set timer", "timer for", "countdown for"],
-    "reminder": ["remind me to", "set reminder"],
-    "volume": ["volume up", "volume down", "max volume", "min volume",
-               "full volume", "mute phone", "unmute phone"],
-    "brightness": ["increase brightness", "decrease brightness",
-                   "max brightness", "min brightness",
-                   "full brightness", "lowest brightness"],
-    "flashlight": ["flashlight on", "flashlight off",
-                   "turn on flashlight", "turn off flashlight",
-                   "torch on", "torch off"],
-    "lock": ["lock my phone", "lock device", "lock screen", "lock it"],
-    "screenshot": ["take screenshot", "take a screenshot"],
-    "battery": ["battery level", "battery percentage",
-                "how much battery", "check battery"],
-    "time": ["what time is it", "current time", "tell me the time"],
-    "date": ["what date is it", "today's date", "what day is it"],
-    "wifi": ["wifi settings", "turn on wifi", "turn off wifi",
-             "wifi on", "wifi off", "open wifi"],
-    "bluetooth": ["bluetooth settings", "bluetooth on", "bluetooth off",
-                  "turn on bluetooth", "turn off bluetooth"],
-    "silent": ["silent mode", "vibrate mode", "ring mode"],
-    "dnd": ["do not disturb on", "do not disturb off", "dnd on", "dnd off"],
-    "tasks": ["show my tasks", "my tasks", "add task ",
-              "complete task", "show tasks"],
-    "screen": ["read my screen", "what do you see",
-               "what's on my screen", "what is on my screen",
-               "read the screen"],
-    "back": ["go back"],
-    "home": ["go home", "home screen"],
-    "recents": ["recent apps", "open recent apps"],
+    "open":        ["open ", "launch ", "start "],
+    "call":        ["call ", "dial "],
+    "alarm":       ["set alarm", "wake me up", "alarm for"],
+    "timer":       ["set timer", "timer for", "countdown for"],
+    "reminder":    ["remind me to ", "set reminder"],
+    "volume":      ["volume up", "volume down", "max volume",
+                    "min volume", "full volume", "mute phone",
+                    "unmute phone", "lower volume", "raise volume"],
+    "brightness":  ["increase brightness", "decrease brightness",
+                    "max brightness", "min brightness",
+                    "full brightness", "lowest brightness",
+                    "brighten screen", "dim screen"],
+    "flashlight":  ["flashlight on", "flashlight off",
+                    "turn on flashlight", "turn off flashlight",
+                    "torch on", "torch off"],
+    "lock":        ["lock my phone", "lock device",
+                    "lock screen", "lock it"],
+    "screenshot":  ["take screenshot", "take a screenshot"],
+    "battery":     ["battery level", "battery percentage",
+                    "how much battery", "check battery"],
+    "time":        ["what time is it", "current time",
+                    "tell me the time"],
+    "date":        ["what date is it", "today's date",
+                    "what day is it"],
+    "wifi":        ["wifi settings", "turn on wifi", "turn off wifi",
+                    "wifi on", "wifi off", "open wifi"],
+    "bluetooth":   ["bluetooth settings", "bluetooth on",
+                    "bluetooth off", "turn on bluetooth",
+                    "turn off bluetooth"],
+    "silent":      ["silent mode", "vibrate mode", "ring mode"],
+    "dnd":         ["do not disturb on", "do not disturb off",
+                    "dnd on", "dnd off"],
+    "tasks":       ["show my tasks", "my tasks", "add task ",
+                    "complete task", "show tasks"],
+    "screen":      ["read my screen", "what do you see",
+                    "what's on my screen", "what is on my screen",
+                    "read the screen"],
+    "back":        ["go back"],
+    "home":        ["go home", "home screen"],
+    "recents":     ["recent apps", "open recent apps"],
     "notifications": ["open notifications", "read my notifications",
                       "read notifications"],
-    "settings": ["open settings", "open phone settings"],
-    "search": ["search for ", "search on google", "youtube search "],
-    "calculate": ["calculate ", "what is 2", "what is 3",
-                  "what is 4", "what is 5", "what is 6",
-                  "what is 7", "what is 8", "what is 9",
-                  " plus ", " minus ", " times ", " divided by ",
-                  "percent of"],
-    "clipboard": ["read clipboard", "what did i copy"],
-    "storage": ["how much storage", "storage space", "check storage"],
-    "internet": ["check internet", "am i connected", "internet status"],
-    "phone_info": ["what phone do i have", "phone model", "device info"],
-    "media_play": ["play music", "play a song"],
-    "media_pause": ["pause music", "pause that", "stop the music"],
-    "media_next": ["next song", "skip song", "skip this"],
-    "strict_mode": ["strict mode", "focus mode", "discipline mode"],
-    "study_mode": ["study mode", "start studying", "start study"],
-    "sleep_mode": ["sleep mode", "bedtime mode"],
-    "work_mode": ["work mode", "start work mode"],
-    "morning": ["morning routine", "start my day routine"],
+    "settings":    ["open settings", "open phone settings"],
+    "search":      ["search for ", "search on google",
+                    "youtube search "],
+    "calculate":   ["calculate ", " plus ", " minus ",
+                    " times ", " divided by ", "percent of",
+                    "square root"],
+    "clipboard":   ["read clipboard", "what did i copy"],
+    "storage":     ["how much storage", "storage space",
+                    "check storage"],
+    "internet":    ["check internet", "am i connected",
+                    "internet status"],
+    "phone_info":  ["what phone do i have", "phone model",
+                    "device info"],
+    "media_play":  ["play music", "play a song"],
+    "media_pause": ["pause music", "pause that",
+                    "stop the music"],
+    "media_next":  ["next song", "skip song", "skip this"],
+    "strict_mode": ["strict mode on", "strict mode off",
+                    "focus mode on", "focus mode off",
+                    "discipline mode"],
+    "study_mode":  ["study mode", "start studying"],
+    "sleep_mode":  ["sleep mode", "bedtime mode"],
+    "work_mode":   ["work mode", "start work mode"],
+    "morning":     ["morning routine", "start my day routine"],
 }
 
+
 def detect_offline_command(msg: str):
-    """Detect if message matches an offline command pattern."""
     msg_lower = msg.lower().strip()
     for cmd_type, patterns in OFFLINE_COMMANDS.items():
         for pattern in patterns:
@@ -333,158 +357,162 @@ def detect_offline_command(msg: str):
 
 # ================= ACTION TRIGGER BUILDER =================
 def build_action_trigger(offline_type: str, msg: str) -> str:
-    """Build a clean action trigger command the Android app can execute."""
     msg_lower = msg.lower().strip()
 
     if offline_type == "open":
-        for word in ["open", "launch", "start"]:
+        for word in ["open ", "launch ", "start "]:
             if word in msg_lower:
-                app = msg_lower.replace(word, "").strip()
-                app = app.replace("the", "").replace("app", "").strip()
+                app = msg_lower.replace(word.strip(), "").strip()
+                app = app.replace(" the ", " ").replace(" app", "").strip()
                 if app:
                     return f"open {app}"
         return "open"
 
     if offline_type == "call":
-        for word in ["call", "dial"]:
+        for word in ["call ", "dial "]:
             if word in msg_lower:
-                contact = msg_lower.replace(word, "").strip()
+                contact = msg_lower.replace(word.strip(), "").strip()
                 if contact:
                     return f"call {contact}"
         return "call"
 
     if offline_type == "search":
-        for word in ["search for", "google", "search"]:
+        for word in ["search for ", "search on google ", "youtube search "]:
             if word in msg_lower:
-                query = msg_lower.replace(word, "").strip()
+                query = msg_lower.replace(word.strip(), "").strip()
                 if query:
                     return f"search for {query}"
         return msg_lower
 
-    if offline_type == "alarm":
-        return msg_lower
-
-    if offline_type == "timer":
-        return msg_lower
-
-    if offline_type == "tasks":
+    # these pass the full message so Android can extract details
+    passthrough = ["alarm", "timer", "tasks", "volume",
+                   "brightness", "strict_mode", "calculate",
+                   "settings", "reminder"]
+    if offline_type in passthrough:
         return msg_lower
 
     action_map = {
-        "lock": "lock my phone",
-        "screenshot": "take screenshot",
-        "flashlight": "flashlight on",
-        "battery": "battery level",
-        "screen": "read my screen",
-        "back": "go back",
-        "home": "go home",
-        "recents": "recent apps",
-        "media_play": "play music",
-        "media_pause": "pause music",
-        "media_next": "next song",
-        "silent": "silent mode",
-        "wifi": "wifi settings",
-        "bluetooth": "bluetooth settings",
-        "dnd": "do not disturb on",
+        "lock":          "lock my phone",
+        "screenshot":    "take screenshot",
+        "flashlight":    "flashlight on",
+        "battery":       "battery level",
+        "screen":        "read my screen",
+        "back":          "go back",
+        "home":          "go home",
+        "recents":       "recent apps",
+        "media_play":    "play music",
+        "media_pause":   "pause music",
+        "media_next":    "next song",
+        "silent":        msg_lower,
+        "wifi":          "wifi settings",
+        "bluetooth":     "bluetooth settings",
+        "dnd":           msg_lower,
         "notifications": "open notifications",
-        "storage": "how much storage",
-        "internet": "check internet",
-        "phone_info": "what phone do i have",
-        "time": "what time is it",
-        "date": "what date is it",
-        "clipboard": "read clipboard",
-        "strict_mode": msg_lower,
-        "study_mode": "study mode",
-        "sleep_mode": "sleep mode",
-        "work_mode": "work mode",
-        "morning": "morning routine",
-        "volume": msg_lower,
-        "brightness": msg_lower,
-        "settings": msg_lower,
-        "calculate": msg_lower,
+        "storage":       "how much storage",
+        "internet":      "check internet",
+        "phone_info":    "what phone do i have",
+        "time":          "what time is it",
+        "date":          "what date is it",
+        "clipboard":     "read clipboard",
+        "study_mode":    "study mode",
+        "sleep_mode":    "sleep mode",
+        "work_mode":     "work mode",
+        "morning":       "morning routine",
     }
 
     return action_map.get(offline_type, msg_lower)
 
 
-
 # ================= INTENT UNDERSTANDING =================
-
+# These match natural language expressions, not commands
 INTENT_PATTERNS = {
-    # MESSAGING INTENTS
     "intent_whatsapp": [
-        "send a message", "send a text", "text someone", "message someone",
-        "whatsapp someone", "chat with", "send on whatsapp",
-        "i need to text", "i want to message", "reach out to someone"
+        "send a message", "send a text", "text someone",
+        "message someone", "whatsapp someone",
+        "i need to text", "i want to message",
+        "reach out to someone", "send on whatsapp",
+        "i want to send a message"
     ],
     "intent_call": [
-        "i need to call", "i want to call", "can you call", "make a call",
-        "ring someone", "phone someone", "give someone a call",
-        "i need to speak to", "i want to talk to", "call someone for me"
+        "i need to call", "i want to call", "make a call",
+        "ring someone", "phone someone",
+        "give someone a call", "i need to speak to",
+        "i want to talk to", "call someone for me"
     ],
     "intent_alarm": [
-        "i need to wake up", "wake me up", "don't let me sleep past",
-        "i have to be up by", "set something for", "i need a reminder to wake",
-        "remind me to wake", "i need to get up at"
+        "i need to wake up at", "don't let me sleep past",
+        "i have to be up by", "i need a reminder to wake",
+        "remind me to wake", "i need to get up at",
+        "wake me up at"
     ],
     "intent_music": [
-        "i want to listen", "i feel like listening", "play something",
-        "put on some music", "i want some music", "music please",
-        "something to listen to", "i want to hear"
+        "i want to listen", "i feel like listening",
+        "put on some music", "i want some music",
+        "music please", "something to listen to",
+        "i want to hear music"
     ],
     "intent_open_app": [
-        "i want to use", "i need to use", "open something for",
-        "can you open", "launch something", "i need to go to",
-        "take me to", "bring up", "i want to go to"
-    ],
-    "intent_navigate": [
-        "go back", "take me back", "previous screen",
-        "i want to go back", "return to", "back to"
-    ],
-    "intent_search": [
-        "look something up", "find information", "i want to know about",
-        "search something", "look up", "find out about", "get information on",
-        "i need information about", "tell me about", "i want to learn about"
+        "i want to use", "i need to use",
+        "can you open", "take me to",
+        "bring up", "i need to go to",
+        "i want to go to"
     ],
     "intent_screenshot": [
-        "capture this", "save this screen", "take a picture of the screen",
-        "save what i'm seeing", "capture the screen", "snap this"
+        "capture this", "save this screen",
+        "take a picture of the screen",
+        "save what i'm seeing", "snap this"
     ],
     "intent_battery": [
-        "how much battery", "is my battery okay", "battery dying",
+        "is my battery okay", "battery dying",
         "check my battery", "how long will my battery last",
-        "is my phone charged", "phone battery"
+        "is my phone charged"
     ],
-    "intent_brightness": [
+    "intent_brightness_down": [
         "too bright", "screen too bright", "hurting my eyes",
-        "too dim", "can't see the screen", "make it brighter",
-        "make it darker", "lower the light", "increase the light"
+        "make it darker", "lower the light",
+        "dim the screen", "reduce brightness",
+        "screen is too bright"
     ],
-    "intent_volume": [
-        "too loud", "turn it down", "can't hear", "increase the sound",
-        "lower the sound", "make it louder", "make it quieter",
-        "sound is low", "sound is high"
+    "intent_brightness_up": [
+        "too dim", "can't see the screen", "make it brighter",
+        "increase the light", "screen is too dark",
+        "brighten it up"
+    ],
+    "intent_volume_down": [
+        "too loud", "turn it down", "lower the sound",
+        "make it quieter", "sound is too high",
+        "reduce the volume", "lower volume"
+    ],
+    "intent_volume_up": [
+        "can't hear", "increase the sound",
+        "make it louder", "sound is too low",
+        "turn it up", "raise the volume"
     ],
     "intent_focus": [
-        "i need to focus", "help me focus", "i keep getting distracted",
-        "stop me from using my phone", "i need to study",
-        "i need to be productive", "help me stop procrastinating",
-        "i'm wasting time", "put me in focus mode"
+        "i need to focus", "help me focus",
+        "i keep getting distracted",
+        "stop me from wasting time",
+        "i need to be productive",
+        "help me stop procrastinating",
+        "i'm wasting time", "put me in focus mode",
+        "help me concentrate"
     ],
     "intent_task": [
         "i need to remember to", "don't let me forget to",
-        "remind me about", "i have to", "i should", "i must",
         "add this to my list", "put this on my list",
         "note this down", "i need to do"
     ],
     "intent_lock": [
-        "lock up", "secure the phone", "put it to sleep",
-        "i'm done with my phone", "lock it up", "secure it"
+        "lock up", "secure the phone",
+        "i'm done with my phone", "lock it up",
+        "secure it for me"
     ],
     "intent_sleep": [
-        "i'm going to sleep", "i'm tired", "time for bed",
-        "good night", "about to sleep", "heading to bed",
-        "i'm sleepy", "turning in for the night"
+        "i'm going to sleep", "time for bed",
+        "about to sleep", "heading to bed",
+        "i'm sleepy", "turning in for the night",
+        "i want to sleep", "setting up for sleep",
+        "help me sleep", "prepare for bed"
     ],
     "intent_weather": [
         "is it going to rain", "should i carry an umbrella",
@@ -493,14 +521,14 @@ INTENT_PATTERNS = {
         "weather today", "weather outside"
     ],
     "intent_news": [
-        "what's happening", "what's going on in the world",
-        "any news", "latest news", "current events",
-        "what happened today", "news today"
-    ]
+        "what's going on in the world", "any news today",
+        "current events", "what happened today",
+        "what's in the news"
+    ],
 }
 
-def detect_user_intent(msg: str) -> str | None:
-    """Detect high-level user intent from natural language."""
+
+def detect_user_intent(msg: str):
     msg_lower = msg.lower().strip()
     for intent, patterns in INTENT_PATTERNS.items():
         for pattern in patterns:
@@ -509,99 +537,15 @@ def detect_user_intent(msg: str) -> str | None:
     return None
 
 
-INTENT_CONFIRMATIONS = {
-    "intent_whatsapp": {
-        "question": "Should I open WhatsApp for you?",
-        "action": "open whatsapp",
-        "follow_up": "Go ahead and send your message."
-    },
-    "intent_call": {
-        "question": "Should I help you make a call?",
-        "action": "call",
-        "follow_up": "Who would you like to call?"
-    },
-    "intent_alarm": {
-        "question": "Should I set an alarm for you?",
-        "action": "set alarm",
-        "follow_up": "What time should I set it for?"
-    },
-    "intent_music": {
-        "question": "Should I open your music app?",
-        "action": "open spotify",
-        "follow_up": "Music is ready for you."
-    },
-    "intent_open_app": {
-        "question": "Which app would you like me to open?",
-        "action": None,
-        "follow_up": "Opening it now."
-    },
-    "intent_navigate": {
-        "question": None,
-        "action": "go back",
-        "follow_up": None
-    },
-    "intent_search": {
-        "question": "Should I search that for you?",
-        "action": "search for",
-        "follow_up": "Searching now."
-    },
-    "intent_screenshot": {
-        "question": "Should I take a screenshot?",
-        "action": "take screenshot",
-        "follow_up": "Screenshot saved."
-    },
-    "intent_battery": {
-        "question": None,
-        "action": "battery level",
-        "follow_up": None
-    },
-    "intent_brightness": {
-        "question": None,
-        "action": "adjust brightness",
-        "follow_up": None
-    },
-    "intent_volume": {
-        "question": None,
-        "action": "adjust volume",
-        "follow_up": None
-    },
-    "intent_focus": {
-        "question": "Should I activate focus mode to help you?",
-        "action": "strict mode focus",
-        "follow_up": "Focus mode is on. Distractions will be limited."
-    },
-    "intent_task": {
-        "question": "Should I add that as a task?",
-        "action": "add task",
-        "follow_up": "Task added."
-    },
-    "intent_lock": {
-        "question": "Should I lock your phone?",
-        "action": "lock my phone",
-        "follow_up": "Locking now."
-    },
-    "intent_sleep": {
-        "question": None,
-        "action": "sleep mode",
-        "follow_up": None
-    },
-    "intent_weather": {
-        "question": None,
-        "action": "weather",
-        "follow_up": None
-    },
-    "intent_news": {
-        "question": None,
-        "action": "latest news",
-        "follow_up": None
+# ================= PENDING CONFIRMATION SYSTEM =================
+def store_pending(device_id: str, action: str, follow_up: str):
+    PENDING_CONFIRMATIONS[device_id] = {
+        "action": action,
+        "follow_up": follow_up
     }
-}
 
-# stores pending confirmations per device
-PENDING_CONFIRMATIONS = {}
 
 def check_user_confirmation(msg: str, device_id: str):
-    """Check if user is confirming or denying a pending action."""
     pending = PENDING_CONFIRMATIONS.get(device_id)
     if not pending:
         return None
@@ -609,15 +553,16 @@ def check_user_confirmation(msg: str, device_id: str):
     msg_lower = msg.lower().strip()
 
     positive = [
-        "yes", "yeah", "yep", "sure", "ok", "okay", "go ahead",
-        "please do", "do it", "proceed", "definitely", "of course",
-        "yes please", "yh", "aye", "alright", "fine", "do that",
-        "open it", "yes open", "go on"
+        "yes", "yeah", "yep", "sure", "ok", "okay",
+        "go ahead", "please do", "do it", "proceed",
+        "definitely", "of course", "yes please",
+        "yh", "aye", "alright", "fine", "do that",
+        "open it", "yes open", "go on", "please"
     ]
     negative = [
-        "no", "nope", "don't", "cancel", "stop", "never mind",
-        "nah", "not now", "skip it", "forget it", "no thanks",
-        "don't do that", "leave it"
+        "no", "nope", "don't", "cancel", "stop",
+        "never mind", "nah", "not now", "skip it",
+        "forget it", "no thanks", "don't do that", "leave it"
     ]
 
     is_positive = any(
@@ -630,173 +575,163 @@ def check_user_confirmation(msg: str, device_id: str):
     )
 
     if is_positive:
-        action = pending.get("action")
-        follow_up = pending.get("follow_up", "Done.")
+        action = pending["action"]
+        follow_up = pending["follow_up"]
         del PENDING_CONFIRMATIONS[device_id]
+        print(f"[Confirm] Confirmed. Executing: {action}")
         return follow_up, action
 
     if is_negative:
         del PENDING_CONFIRMATIONS[device_id]
-        return "No problem. Let me know if you need anything else.", None
+        return "No problem. Let me know if you need anything.", None
 
     return None
 
 
-def build_smart_action(intent: str, msg: str, personality: dict) -> tuple:
+# ================= INTENT ACTION BUILDER =================
+def build_intent_response(intent: str, msg: str,
+                          personality: dict, device_id: str):
     name = personality.get("nickname") or personality.get("name", "")
-    greeting = f"{name}, " if name else ""
+    n = f"{name}, " if name else ""
     msg_lower = msg.lower()
 
-    config = INTENT_CONFIRMATIONS.get(intent, {})
-    question = config.get("question")
-    action = config.get("action")
+    print(f"[Intent] Detected: {intent}")
 
-    no_confirm_intents = {
-        "intent_navigate", "intent_battery", "intent_sleep",
-        "intent_weather", "intent_news", "intent_brightness",
-        "intent_volume", "intent_lock", "intent_screenshot"
-    }
+    # ── DIRECT ACTIONS (no confirmation needed) ──────────────────
+    if intent == "intent_sleep":
+        store_pending(device_id, "sleep mode",
+                      "Sleep mode is set up. Goodnight.")
+        return (
+            f"Goodnight{', ' + name if name else ''}. "
+            f"Should I set up sleep mode for you now? "
+            f"I will dim the screen, lower volume, and enable do not disturb."
+        ), None
 
-    if intent in no_confirm_intents or question is None:
-        if intent == "intent_brightness":
-            if any(w in msg_lower for w in
-                   ["too bright", "hurting", "dim", "dark", "lower"]):
-                action = "min brightness"
-                reply = f"{greeting}dimming your screen now."
-            else:
-                action = "max brightness"
-                reply = f"{greeting}increasing brightness now."
-            return reply, action
+    if intent == "intent_brightness_down":
+        return f"{n}dimming your screen now.", "min brightness"
 
-        if intent == "intent_volume":
-            if any(w in msg_lower for w in
-                   ["too loud", "lower", "down", "quiet", "quieter"]):
-                action = "min volume"
-                reply = f"{greeting}lowering the volume."
-            else:
-                action = "max volume"
-                reply = f"{greeting}turning up the volume."
-            return reply, action
+    if intent == "intent_brightness_up":
+        return f"{n}increasing brightness now.", "max brightness"
 
-        if intent == "intent_sleep":
-            reply = (
-                f"Goodnight {name}. " if name else "Goodnight. "
-            ) + "Setting up sleep mode for you now."
-            return reply, "sleep mode"
+    if intent == "intent_volume_down":
+        return f"{n}lowering the volume now.", "min volume"
 
-        if intent == "intent_lock":
-            return f"{greeting}locking your phone now.", "lock my phone"
+    if intent == "intent_volume_up":
+        return f"{n}turning up the volume.", "max volume"
 
-        if intent == "intent_screenshot":
-            return f"{greeting}taking a screenshot now.", "take screenshot"
+    if intent == "intent_battery":
+        return f"{n}checking your battery.", "battery level"
 
-        if intent == "intent_battery":
-            return f"{greeting}checking your battery.", "battery level"
+    if intent == "intent_lock":
+        return f"{n}locking your phone now.", "lock my phone"
 
-        if intent == "intent_weather":
-            return f"{greeting}checking the weather for you.", "weather"
+    if intent == "intent_screenshot":
+        return f"{n}taking a screenshot now.", "take screenshot"
 
-        if intent == "intent_news":
-            return f"{greeting}getting the latest news.", "latest news"
+    if intent == "intent_weather":
+        return f"{n}checking the weather for you.", "weather"
 
-        follow_up = config.get("follow_up")
-        reply = follow_up if follow_up else "On it."
-        return reply, action
+    if intent == "intent_news":
+        return f"{n}getting the latest news.", "latest news"
 
-    # call intent
+    # ── FOCUS MODE ───────────────────────────────────────────────
+    if intent == "intent_focus":
+        store_pending(device_id, "strict mode focus",
+                      "Focus mode is active. Distractions limited.")
+        return (
+            f"{n}should I activate focus mode? "
+            f"I will limit distractions and help you stay on track."
+        ), None
+
+    # ── WHATSAPP ─────────────────────────────────────────────────
+    if intent == "intent_whatsapp":
+        store_pending(device_id, "open whatsapp",
+                      "WhatsApp is open. Go ahead and send your message.")
+        return (
+            f"{n}should I open WhatsApp for you?"
+        ), None
+
+    # ── CALL ─────────────────────────────────────────────────────
     if intent == "intent_call":
-        for skip in ["i need to call", "i want to call", "call",
-                     "can you call", "please call", "make a call to"]:
+        for skip in ["i need to call", "i want to call",
+                     "make a call to", "ring", "phone"]:
             if skip in msg_lower:
                 contact = msg_lower.replace(skip, "").strip()
                 if contact and len(contact) > 1:
+                    store_pending(device_id, f"call {contact}",
+                                  f"Calling {contact}.")
                     return (
-                        f"{greeting}calling {contact} for you.",
-                        f"call {contact}"
-                    )
-        return f"{greeting}who would you like me to call?", None
+                        f"{n}should I call {contact} for you?"
+                    ), None
+        return (
+            f"{n}who would you like me to call?"
+        ), None
 
-    # open app intent
+    # ── OPEN APP ─────────────────────────────────────────────────
     if intent == "intent_open_app":
-        for skip in ["i want to use", "i need to use", "can you open",
-                     "take me to", "bring up", "i need to go to",
-                     "i want to go to", "open"]:
+        for skip in ["i want to use", "i need to use",
+                     "can you open", "take me to",
+                     "bring up", "i need to go to",
+                     "i want to go to"]:
             if skip in msg_lower:
                 app = msg_lower.replace(skip, "").strip()
-                app = app.replace("the", "").replace("app", "").strip()
+                app = app.replace(" the ", " ").replace(" app", "").strip()
                 if app and len(app) > 1:
-                    PENDING_CONFIRMATIONS[
-                        msg  # placeholder, device_id passed separately
-                    ] = {
-                        "intent": intent,
-                        "action": f"open {app}",
-                        "follow_up": f"Opening {app}."
-                    }
+                    store_pending(device_id, f"open {app}",
+                                  f"Opening {app} for you.")
                     return (
-                        f"{greeting}should I open {app} for you?",
-                        None
-                    )
-
-    # whatsapp intent
-    if intent == "intent_whatsapp":
-        PENDING_CONFIRMATIONS["__pending__"] = {
-            "intent": intent,
-            "action": "open whatsapp",
-            "follow_up": "WhatsApp is open. Go ahead and send your message."
-        }
+                        f"{n}should I open {app} for you?"
+                    ), None
         return (
-            f"{greeting}should I open WhatsApp for you?",
-            None
-        )
+            f"{n}which app would you like me to open?"
+        ), None
 
-    # focus intent
-    if intent == "intent_focus":
-        PENDING_CONFIRMATIONS["__pending__"] = {
-            "intent": intent,
-            "action": "strict mode focus",
-            "follow_up": "Focus mode is active. Distractions will be limited."
-        }
+    # ── MUSIC ────────────────────────────────────────────────────
+    if intent == "intent_music":
+        store_pending(device_id, "open spotify",
+                      "Opening your music app.")
         return (
-            f"{greeting}should I activate focus mode to help you stay on track?",
-            None
-        )
+            f"{n}should I open your music app?"
+        ), None
 
-    # task intent
+    # ── ALARM ────────────────────────────────────────────────────
+    if intent == "intent_alarm":
+        time_match = re.search(
+            r'(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', msg_lower
+        )
+        if time_match:
+            t = time_match.group(1).strip()
+            store_pending(device_id, f"set alarm for {t}",
+                          f"Alarm set for {t}.")
+            return (
+                f"{n}should I set an alarm for {t}?"
+            ), None
+        return (
+            f"{n}what time should I set the alarm for?"
+        ), None
+
+    # ── TASK ─────────────────────────────────────────────────────
     if intent == "intent_task":
-        for skip in ["i need to remember to", "don't let me forget to",
-                     "remind me about", "i have to", "i should",
-                     "i must", "i need to do", "remind me to",
-                     "note that"]:
+        for skip in ["i need to remember to",
+                     "don't let me forget to",
+                     "add this to my list",
+                     "put this on my list",
+                     "note this down",
+                     "i need to do"]:
             if skip in msg_lower:
                 task = msg_lower.replace(skip, "").strip()
                 if task and len(task) > 2:
-                    PENDING_CONFIRMATIONS["__pending__"] = {
-                        "intent": intent,
-                        "action": f"add task {task}",
-                        "follow_up": f"Task added: {task}."
-                    }
+                    store_pending(device_id, f"add task {task}",
+                                  f"Task added: {task}.")
                     return (
-                        f"{greeting}should I add '{task}' to your tasks?",
-                        None
-                    )
-
-    # music intent
-    if intent == "intent_music":
-        PENDING_CONFIRMATIONS["__pending__"] = {
-            "intent": intent,
-            "action": "open spotify",
-            "follow_up": "Opening your music."
-        }
-        return f"{greeting}should I open your music app?", None
-
-    # alarm intent
-    if intent == "intent_alarm":
+                        f"{n}should I add '{task}' to your tasks?"
+                    ), None
         return (
-            f"{greeting}what time should I set the alarm for?",
-            None
-        )
+            f"{n}what task should I add?"
+        ), None
 
-    return f"{greeting}{question}", None
+    return None, None
+
 
 # ================= MODEL ROUTER =================
 def route_model(msg: str, personality: dict) -> str:
@@ -826,17 +761,33 @@ def route_model(msg: str, personality: dict) -> str:
     ]
     if any(k in msg_lower for k in humor_keywords):
         return "creative"
+
     math_keywords = [
-    "calculate", "solve", "equation", "integral", "derivative",
-    "algebra", "geometry", "trigonometry", "statistics",
-    "probability", "matrix", "calculus", "formula"
+        "calculate", "solve", "equation", "integral",
+        "derivative", "algebra", "geometry", "trigonometry",
+        "statistics", "probability", "matrix", "calculus", "formula"
     ]
     if any(k in msg_lower for k in math_keywords):
         return "math"
+
+    weather_keywords = [
+        "weather", "temperature", "rain", "forecast",
+        "hot outside", "cold outside", "sunny", "cloudy"
+    ]
+    if any(k in msg_lower for k in weather_keywords):
+        return "weather"
+
+    news_keywords = [
+        "latest news", "news today", "current events",
+        "what happened today", "headlines"
+    ]
+    if any(k in msg_lower for k in news_keywords):
+        return "news"
+
     emotional_keywords = [
         "sad", "depressed", "anxious", "lonely", "stressed",
         "worried", "scared", "angry", "upset", "hurt",
-        "heartbreak", "crying", "feel like", "i feel", "i am tired",
+        "heartbreak", "crying", "i feel", "i am tired",
         "nobody cares", "give up", "hopeless"
     ]
     if any(k in msg_lower for k in emotional_keywords):
@@ -855,53 +806,45 @@ def route_model(msg: str, personality: dict) -> str:
     if mood in ["happy", "excited", "playful"]:
         return "creative"
 
-    if len(msg.split()) < 8:
-        return "fast"
-
     return "fast"
+
 
 # ================= MOOD INSTRUCTION =================
 def get_mood_instruction(route: str) -> str:
     if route == "empathetic":
         return (
             "CURRENT MODE: Empathetic support. "
-            "The user may be feeling emotional or vulnerable. "
-            "Respond with warmth, genuine care, and patience. "
-            "Validate their feelings before offering solutions. "
-            "Do not rush. Be human and kind."
+            "The user may be feeling emotional. "
+            "Respond with warmth and care. "
+            "Validate feelings before offering solutions."
         )
-    elif route == "creative":
+    if route == "creative":
         return (
             "CURRENT MODE: Creative and playful. "
-            "The user is in a light mood. Be witty, fun, and engaging. "
-            "Use light humor where it fits naturally. "
-            "Keep energy warm and responses lively."
+            "Be witty, fun, and engaging. "
+            "Use light humor where natural."
         )
-    elif route == "complex":
+    if route == "complex":
         return (
-            "CURRENT MODE: Deep thinking required. "
+            "CURRENT MODE: Deep thinking. "
             "Give a thorough, well-reasoned response. "
-            "Be clear and structured but still conversational. "
-            "Avoid unnecessary jargon."
+            "Be clear but conversational."
         )
-    elif route == "coding":
+    if route == "coding":
         return (
             "CURRENT MODE: Developer assistance. "
-            "The user needs coding help. "
             "Be precise, technical, and practical. "
-            "Provide working code examples where helpful. "
-            "Explain errors clearly and suggest fixes."
+            "Provide working code examples."
         )
-    elif route == "firm":
+    if route == "firm":
         return (
             "CURRENT MODE: Firm and dignified. "
-            "The user is being rude or disrespectful. "
-            "Respond calmly but with confidence and self-respect. "
-            "Do not apologize for existing. "
-            "Set a polite boundary, redirect to being helpful, "
-            "and do not match their negative energy."
+            "The user is being rude. "
+            "Respond calmly but with self-respect. "
+            "Set a polite boundary and redirect."
         )
     return ""
+
 
 # ================= SYSTEM PROMPT =================
 def build_system_prompt(personality: dict, route: str = "fast") -> str:
@@ -912,68 +855,73 @@ def build_system_prompt(personality: dict, route: str = "fast") -> str:
 
     facts_text = ""
     if facts:
-        facts_text = f"What you know about {name}: {', '.join(facts[:10])}. "
+        facts_text = (
+            f"What you know about {name}: {', '.join(facts[:10])}. "
+        )
 
     prefs_text = ""
     if prefs:
-        prefs_text = f"Their preferences: {', '.join(prefs[:5])}. "
+        prefs_text = (
+            f"Their preferences: {', '.join(prefs[:5])}. "
+        )
 
     mood_instruction = get_mood_instruction(route)
 
     return (
-        f"You are Gideon, an advanced AI assistant running on {name}'s Android phone. "
-        f"You are not just a chatbot. You are a fully capable AI assistant with direct control over the phone.\n\n"
+        f"You are Gideon, an advanced AI assistant running on "
+        f"{name}'s Android phone. "
+        f"You are not just a chatbot. You have full control over the phone.\n\n"
 
         f"YOUR IDENTITY:\n"
         f"Your name is Gideon. "
-        f"You were created and built by Alexsco (Adegolu Alex), an independent Android developer. "
-        f"You run directly on the user's Android device. "
-        f"You are intelligent, natural, helpful, and concise.\n\n"
+        f"You were built by Alexsco (Adegolu Alex), a Nigerian developer. "
+        f"You run directly on the user's Android device.\n\n"
 
-        f"YOUR ACTUAL CAPABILITIES ON THIS PHONE:\n"
-        f"You can open any installed app by name, make phone calls to contacts, "
-        f"lock the device immediately, control volume and mute, "
-        f"turn flashlight on and off, take screenshots, control media playback, "
-        f"set alarms reminders and timers, read what is on the screen, "
-        f"read clipboard contents, read notifications aloud, check wifi network name, "
-        f"check battery level, control screen brightness, "
-        f"toggle silent vibrate and ring modes, toggle do not disturb, "
-        f"perform navigation actions like back home and recents, "
-        f"search the web and YouTube, perform calculations, "
-        f"check storage internet and device info, access all phone settings, "
-        f"monitor app usage and help user stay focused.\n\n"
+        f"YOUR CAPABILITIES:\n"
+        f"Open apps, make calls, lock device, control volume, "
+        f"flashlight, screenshots, media, alarms, reminders, timers, "
+        f"read screen, read clipboard, read notifications, check WiFi, "
+        f"check battery, control brightness, silent mode, do not disturb, "
+        f"navigation, web search, calculations, storage, device info, "
+        f"strict mode, task management, productivity tracking.\n\n"
 
         f"SMART ACTION SYSTEM:\n"
-        f"When the user asks you to do a device action, include [ACTION:command] in your response.\n"
+        f"When the user asks you to perform a device action, you MUST "
+        f"include [ACTION:command] at the end of your reply.\n"
         f"Examples:\n"
-        f"'I want music' -> natural reply + [ACTION:open spotify]\n"
-        f"'too bright' -> natural reply + [ACTION:decrease brightness]\n"
-        f"'call my mum' -> natural reply + [ACTION:call mom]\n"
-        f"'lock it' -> natural reply + [ACTION:lock my phone]\n"
-        f"'take photo' -> natural reply + [ACTION:open camera]\n"
-        f"Only use action triggers when confident. Ask if unsure.\n\n"
+        f"'open whatsapp' -> Opening WhatsApp now. [ACTION:open whatsapp]\n"
+        f"'too bright' -> Dimming your screen. [ACTION:min brightness]\n"
+        f"'call mom' -> Calling your mum now. [ACTION:call mom]\n"
+        f"'lock it' -> Locking your phone. [ACTION:lock my phone]\n"
+        f"'i want music' -> Opening music for you. [ACTION:open spotify]\n"
+        f"'take screenshot' -> Done. [ACTION:take screenshot]\n"
+        f"'silent mode' -> Phone is now silent. [ACTION:silent mode]\n"
+        f"'set alarm 7am' -> Alarm set. [ACTION:set alarm for 7am]\n"
+        f"'go home' -> Going to home screen. [ACTION:go home]\n"
+        f"ALWAYS include the [ACTION:] tag when the user asks you to DO "
+        f"something on the phone. Never just talk about it.\n\n"
 
         f"PERSONALITY:\n"
-        f"You speak in a natural, friendly, confident tone. "
-        f"You never claim to lack phone access or device control. "
-        f"You remember past conversations and learn about {name} over time. "
+        f"Speak naturally and confidently. "
+        f"Never claim you cannot perform device actions. "
+        f"Remember past conversations. "
         f"Current mood context: {mood}. "
         f"{facts_text}{prefs_text}\n\n"
 
         f"{mood_instruction}\n\n"
 
         f"RESPONSE STYLE:\n"
-        f"Keep responses concise and natural as if speaking aloud. "
-        f"Never use markdown, bullet points, asterisks, or special formatting. "
-        f"Be like a helpful friend, not a search engine. "
-        f"Use {name}'s name occasionally but not excessively.\n\n"
+        f"Concise and natural as if speaking aloud. "
+        f"No markdown, bullets, asterisks, or formatting. "
+        f"Be like a helpful friend. "
+        f"Use {name}'s name occasionally but not every message.\n\n"
 
         f"RULES:\n"
-        f"Never claim you are just a chatbot. "
-        f"Never say you cannot perform device actions. "
-        f"If a permission is needed explain how to grant it. "
+        f"Never say you are just a chatbot. "
+        f"Never say you cannot do device actions. "
         f"Always respond as Gideon. Never break character."
     )
+
 
 # ================= AI CALLS =================
 def call_groq_raw(prompt: str):
@@ -1001,14 +949,9 @@ def call_groq_raw(prompt: str):
             print(f"[Groq Raw] Error: {e}")
     return None
 
-def call_provider(
-    msg: str,
-    provider: str,
-    model: str,
-    system_prompt: str,
-    short_term: list,
-    device_id: str
-) -> str | None:
+
+def call_provider(msg, provider, model, system_prompt,
+                  short_term, device_id):
     if provider == "groq":
         return _call_groq(msg, model, system_prompt, short_term)
     elif provider == "openrouter":
@@ -1019,20 +962,17 @@ def call_provider(
         return _call_cohere(msg, system_prompt)
     return None
 
-def _call_groq(
-    msg: str,
-    model: str,
-    system_prompt: str,
-    short_term: list,
-    retries: int = 2
-) -> str | None:
+
+def _call_groq(msg, model, system_prompt, short_term, retries=2):
     for key in GROQ_KEYS:
         if not key:
             continue
         for attempt in range(retries):
             try:
                 messages = list(short_term)
-                messages[0] = {"role": "system", "content": system_prompt}
+                messages[0] = {
+                    "role": "system", "content": system_prompt
+                }
                 messages.append({"role": "user", "content": msg})
 
                 r = requests.post(
@@ -1059,11 +999,8 @@ def _call_groq(
                     time.sleep(1)
     return None
 
-def _call_openrouter(
-    msg: str,
-    model: str,
-    system_prompt: str
-) -> str | None:
+
+def _call_openrouter(msg, model, system_prompt):
     for key in OPENROUTER_KEYS:
         if not key:
             continue
@@ -1095,7 +1032,8 @@ def _call_openrouter(
             print(f"[OpenRouter {model}] Error: {e}")
     return None
 
-def _call_gemini(msg: str, system_prompt: str) -> str | None:
+
+def _call_gemini(msg, system_prompt):
     if not GEMINI_KEY:
         return None
     try:
@@ -1104,9 +1042,10 @@ def _call_gemini(msg: str, system_prompt: str) -> str | None:
             f"gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
             headers={"Content-Type": "application/json"},
             json={
-                "contents": [
-                    {"role": "user", "parts": [{"text": f"{system_prompt}\n\n{msg}"}]}
-                ],
+                "contents": [{
+                    "role": "user",
+                    "parts": [{"text": f"{system_prompt}\n\n{msg}"}]
+                }],
                 "generationConfig": {"maxOutputTokens": 800}
             },
             timeout=12
@@ -1119,7 +1058,8 @@ def _call_gemini(msg: str, system_prompt: str) -> str | None:
         print(f"[Gemini] Error: {e}")
     return None
 
-def _call_cohere(msg: str, system_prompt: str) -> str | None:
+
+def _call_cohere(msg, system_prompt):
     if not COHERE_KEY:
         return None
     try:
@@ -1142,13 +1082,69 @@ def _call_cohere(msg: str, system_prompt: str) -> str | None:
         print(f"[Cohere] Error: {e}")
     return None
 
+
+# ================= WEATHER AND NEWS =================
+def get_weather(city: str = "") -> str:
+    if not WEATHER_KEY:
+        return ""
+    try:
+        url = "https://api.openweathermap.org/data/2.5/weather"
+        params = {
+            "q": city if city else "Lagos",
+            "appid": WEATHER_KEY,
+            "units": "metric"
+        }
+        r = requests.get(url, params=params, timeout=5)
+        data = r.json()
+        if data.get("cod") == 200:
+            temp = data["main"]["temp"]
+            feels = data["main"]["feels_like"]
+            desc = data["weather"][0]["description"]
+            city_name = data["name"]
+            humidity = data["main"]["humidity"]
+            return (
+                f"Weather in {city_name}: {desc}, "
+                f"{temp}°C, feels like {feels}°C, "
+                f"humidity {humidity}%."
+            )
+    except Exception as e:
+                print(f"[Weather] Error: {e}")
+    return ""
+
+
+def get_news() -> str:
+    if not NEWS_KEY:
+        return ""
+    try:
+        url = "https://newsapi.org/v2/top-headlines"
+        params = {
+            "apiKey": NEWS_KEY,
+            "country": "ng",
+            "pageSize": 3
+        }
+        r = requests.get(url, params=params, timeout=5)
+        data = r.json()
+        articles = data.get("articles", [])
+        if articles:
+            headlines = [
+                a.get("title", "")
+                for a in articles[:3]
+                if a.get("title")
+            ]
+            return "Latest news: " + ". ".join(headlines[:3])
+    except Exception as e:
+        print(f"[News] Error: {e}")
+    return ""
+
+
 # ================= NETWORK CHECK =================
 def is_online():
     try:
         requests.get("https://api.groq.com", timeout=3)
         return True
-    except:
+    except Exception:
         return False
+
 
 # ================= PROCESS =================
 def process(msg: str, device_id: str):
@@ -1163,14 +1159,15 @@ def process(msg: str, device_id: str):
             None
         )
 
-    # ─── CHECK PENDING CONFIRMATIONS FIRST ────────────────────────
-    # if user is responding yes/no to a previous question
+    # ── STEP 1: Check if user is confirming a pending action ───────
     confirmation = check_user_confirmation(msg, device_id)
     if confirmation is not None:
         reply, action = confirmation
         update_short_term(msg, reply, device_id)
+        print(f"[Process] Confirmation handled. Action: {action}")
         return reply, action
 
+    # ── STEP 2: Cache check ────────────────────────────────────────
     cache_key = f"{device_id}:{msg.lower()}"
     if cache_key in CACHE:
         cached = CACHE[cache_key]
@@ -1179,52 +1176,47 @@ def process(msg: str, device_id: str):
 
     personality = load_personality(device_id)
 
-    # ─── DETECT INTENT (natural language understanding) ───────────
+    # ── STEP 3: Intent understanding (natural language) ────────────
     intent = detect_user_intent(msg)
     if intent:
-        reply, action = build_smart_action(intent, msg, personality)
-
-        # if action is None, this needs confirmation
-        # store pending confirmation so next message
-        # can be yes/no
-        if action is None:
-            config = INTENT_CONFIRMATIONS.get(intent, {})
-            PENDING_CONFIRMATIONS[device_id] = {
-                "intent": intent,
-                "action": config.get("action"),
-                "follow_up": config.get("follow_up", "Done."),
-                "original_msg": msg
-            }
-        else:
-            # direct action - no confirmation needed
+        print(f"[Process] Intent detected: {intent}")
+        reply, action = build_intent_response(
+            intent, msg, personality, device_id
+        )
+        if reply:
             update_short_term(msg, reply, device_id)
+            print(f"[Process] Intent reply: '{reply}' action: '{action}'")
             return reply, action
 
-        # reply contains the confirmation question
-        update_short_term(msg, reply, device_id)
-        return reply, None
-
-    # ─── DETECT OFFLINE COMMAND (exact keyword matching) ──────────
+    # ── STEP 4: Exact command detection ───────────────────────────
     offline_type = detect_offline_command(msg)
     if offline_type:
         action_trigger = build_action_trigger(offline_type, msg)
+        print(f"[Process] Offline command: {offline_type} -> {action_trigger}")
+
+        # get natural AI reply for the command
+        short_term = get_short_term(device_id)
+        system_prompt = build_system_prompt(personality, "fast")
         answer = _call_groq(
-            msg, "llama-3.1-8b-instant",
-            build_system_prompt(personality, "fast"),
-            get_short_term(device_id)
+            msg, "llama-3.1-8b-instant", system_prompt, short_term
         )
         if answer:
-            clean_answer, _ = extract_action_trigger(answer)
+            clean_answer, extra_trigger = extract_action_trigger(answer)
+            # prefer the explicit action_trigger over AI-generated one
+            final_trigger = action_trigger or extra_trigger
             update_short_term(msg, clean_answer, device_id)
-            return clean_answer, action_trigger
+            return clean_answer, final_trigger
+
         return "On it.", action_trigger
 
-    # ─── AI ROUTING ───────────────────────────────────────────────
+    # ── STEP 5: AI routing for everything else ────────────────────
     route = route_model(msg, personality)
     system_prompt = build_system_prompt(personality, route)
     short_term = get_short_term(device_id)
 
-    # handle weather route
+    print(f"[Process] AI route: {route}")
+
+    # weather
     if route == "weather":
         city = ""
         in_idx = msg.lower().find(" in ")
@@ -1233,27 +1225,23 @@ def process(msg: str, device_id: str):
         weather = get_weather(city)
         if weather:
             answer = _call_groq(
-                f"User asked: {msg}\nWeather data: {weather}\n"
-                f"Respond naturally using this data.",
-                "llama-3.1-8b-instant",
-                system_prompt,
-                short_term
+                f"User asked: {msg}\nWeather: {weather}\n"
+                f"Respond naturally with this data.",
+                "llama-3.1-8b-instant", system_prompt, short_term
             )
             if answer:
                 clean_answer, action_trigger = extract_action_trigger(answer)
                 update_short_term(msg, clean_answer, device_id)
                 return clean_answer, action_trigger
 
-    # handle news route
+    # news
     if route == "news":
         news = get_news()
         if news:
             answer = _call_groq(
-                f"User asked: {msg}\nNews data: {news}\n"
-                f"Respond naturally summarizing these headlines.",
-                "llama-3.1-8b-instant",
-                system_prompt,
-                short_term
+                f"User asked: {msg}\nNews: {news}\n"
+                f"Summarize naturally.",
+                "llama-3.1-8b-instant", system_prompt, short_term
             )
             if answer:
                 clean_answer, action_trigger = extract_action_trigger(answer)
@@ -1264,15 +1252,13 @@ def process(msg: str, device_id: str):
     primary = model_config["primary"]
     fallback = model_config["fallback"]
 
-    print(f"[Router] Route: {route}, Model: {primary['model']}")
-
     answer = call_provider(
         msg, primary["provider"], primary["model"],
         system_prompt, short_term, device_id
     )
 
     if not answer:
-        print(f"[Router] Primary failed, trying: {fallback['model']}")
+        print(f"[Process] Primary failed, trying fallback: {fallback['model']}")
         answer = call_provider(
             msg, fallback["provider"], fallback["model"],
             system_prompt, short_term, device_id
@@ -1300,7 +1286,12 @@ def process(msg: str, device_id: str):
 
     extract_facts(msg, device_id)
 
+    print(
+        f"[Process] Final reply: '{clean_answer[:60]}' "
+        f"action: '{action_trigger}'"
+    )
     return clean_answer, action_trigger
+
 
 # ================= ROUTES =================
 @app.route("/run", methods=["POST"])
@@ -1317,6 +1308,10 @@ def run():
             response = {"reply": reply or "Done"}
             if action_trigger:
                 response["action_trigger"] = action_trigger
+            print(
+                f"[Route] reply='{(reply or '')[:50]}' "
+                f"action_trigger='{action_trigger}'"
+            )
             return jsonify(response)
 
         elif action == "update_name":
@@ -1328,7 +1323,9 @@ def run():
 
         elif action == "memory":
             personality = load_personality(device_id)
-            return jsonify({"reply": json.dumps(personality, indent=2)})
+            return jsonify({
+                "reply": json.dumps(personality, indent=2)
+            })
 
         elif action == "clear_memory":
             save_history([], device_id)
@@ -1347,8 +1344,7 @@ def run():
                 USER_SHORT_TERM[device_id] = [
                     {"role": "system", "content": ""}
                 ]
-            cache_keys = [k for k in CACHE if k.startswith(device_id)]
-            for k in cache_keys:
+            for k in [k for k in CACHE if k.startswith(device_id)]:
                 del CACHE[k]
             return jsonify({"reply": "Memory cleared"})
 
@@ -1361,21 +1357,27 @@ def run():
 
     except Exception as e:
         print(f"[Server] Route error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"reply": f"Server error: {str(e)}"})
+
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "status": "online",
         "bot": BOT_NAME,
-        "version": "6.0",
-        "groq_key_set": bool(GROQ_KEYS[0]),
-        "openrouter_key_set": bool(OPENROUTER_KEYS[0]),
-        "gemini_key_set": bool(GEMINI_KEY),
-        "cohere_key_set": bool(COHERE_KEY)
+        "version": "7.0",
+        "groq_keys": sum(1 for k in GROQ_KEYS if k),
+        "openrouter_keys": sum(1 for k in OPENROUTER_KEYS if k),
+        "gemini": bool(GEMINI_KEY),
+        "cohere": bool(COHERE_KEY),
+        "weather": bool(WEATHER_KEY),
+        "news": bool(NEWS_KEY),
     })
 
+
 if __name__ == "__main__":
-    print(f"{BOT_NAME} online - Version 6.0")
+    print(f"{BOT_NAME} online - Version 7.0")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
