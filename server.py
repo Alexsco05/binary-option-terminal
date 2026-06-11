@@ -265,53 +265,60 @@ def extract_action_trigger(reply: str):
 
 # ================= OFFLINE COMMAND DETECTION =================
 OFFLINE_COMMANDS = {
-    "open": ["open", "launch", "start"],
-    "call": ["call", "dial"],
-    "alarm": ["set alarm", "wake me", "alarm for"],
-    "timer": ["set timer", "timer for", "countdown"],
-    "reminder": ["remind me", "set reminder"],
-    "volume": ["volume up", "volume down", "mute", "unmute",
-               "max volume", "min volume", "full volume"],
+    "open": ["open ", "launch ", "start "],  # note trailing space
+    "call": ["call ", "dial "],
+    "alarm": ["set alarm", "wake me up", "alarm for"],
+    "timer": ["set timer", "timer for", "countdown for"],
+    "reminder": ["remind me to", "set reminder"],
+    "volume": ["volume up", "volume down", "max volume", "min volume",
+               "full volume", "mute phone", "unmute phone"],
     "brightness": ["increase brightness", "decrease brightness",
-                   "max brightness", "min brightness", "brightest", "dimmest"],
-    "flashlight": ["turn on flashlight", "turn off flashlight",
-                   "flashlight on", "flashlight off"],
+                   "max brightness", "min brightness",
+                   "full brightness", "lowest brightness"],
+    "flashlight": ["flashlight on", "flashlight off",
+                   "turn on flashlight", "turn off flashlight",
+                   "torch on", "torch off"],
     "lock": ["lock my phone", "lock device", "lock screen", "lock it"],
-    "screenshot": ["take screenshot", "screenshot"],
-    "battery": ["battery level", "battery percentage", "how much battery"],
-    "time": ["what time", "current time", "what is the time"],
-    "date": ["what date", "today's date", "what is today"],
+    "screenshot": ["take screenshot", "take a screenshot"],
+    "battery": ["battery level", "battery percentage",
+                "how much battery", "check battery"],
+    "time": ["what time is it", "current time", "tell me the time"],
+    "date": ["what date is it", "today's date", "what day is it"],
     "wifi": ["wifi settings", "turn on wifi", "turn off wifi",
-             "wifi on", "wifi off"],
+             "wifi on", "wifi off", "open wifi"],
     "bluetooth": ["bluetooth settings", "bluetooth on", "bluetooth off",
                   "turn on bluetooth", "turn off bluetooth"],
-    "silent": ["silent mode", "vibrate mode", "ring mode", "mute phone"],
-    "dnd": ["do not disturb", "dnd on", "dnd off"],
-    "tasks": ["show tasks", "my tasks", "add task",
-              "complete task", "show my tasks"],
+    "silent": ["silent mode", "vibrate mode", "ring mode"],
+    "dnd": ["do not disturb on", "do not disturb off", "dnd on", "dnd off"],
+    "tasks": ["show my tasks", "my tasks", "add task ",
+              "complete task", "show tasks"],
     "screen": ["read my screen", "what do you see",
-               "what's on my screen", "what is on my screen"],
+               "what's on my screen", "what is on my screen",
+               "read the screen"],
     "back": ["go back"],
     "home": ["go home", "home screen"],
-    "recents": ["recent apps", "open recent"],
-    "notifications": ["open notifications", "read my notifications"],
-    "settings": ["open settings", "open wifi settings",
-                 "open bluetooth settings"],
-    "search": ["search for", "google", "youtube search", "search on youtube"],
-    "calculate": ["calculate", "what is", "plus", "minus",
-                  "times", "divided by"],
+    "recents": ["recent apps", "open recent apps"],
+    "notifications": ["open notifications", "read my notifications",
+                      "read notifications"],
+    "settings": ["open settings", "open phone settings"],
+    "search": ["search for ", "search on google", "youtube search "],
+    "calculate": ["calculate ", "what is 2", "what is 3",
+                  "what is 4", "what is 5", "what is 6",
+                  "what is 7", "what is 8", "what is 9",
+                  " plus ", " minus ", " times ", " divided by ",
+                  "percent of"],
     "clipboard": ["read clipboard", "what did i copy"],
-    "storage": ["how much storage", "storage space"],
+    "storage": ["how much storage", "storage space", "check storage"],
     "internet": ["check internet", "am i connected", "internet status"],
-    "phone_info": ["what phone", "phone model", "device info"],
-    "media_play": ["play music", "play song"],
-    "media_pause": ["pause music", "pause that", "stop music"],
-    "media_next": ["next song", "skip song", "skip"],
+    "phone_info": ["what phone do i have", "phone model", "device info"],
+    "media_play": ["play music", "play a song"],
+    "media_pause": ["pause music", "pause that", "stop the music"],
+    "media_next": ["next song", "skip song", "skip this"],
     "strict_mode": ["strict mode", "focus mode", "discipline mode"],
-    "study_mode": ["study mode", "start studying"],
-    "sleep_mode": ["sleep mode", "good night", "bedtime"],
-    "work_mode": ["work mode", "start work"],
-    "morning": ["morning routine", "start my day"],
+    "study_mode": ["study mode", "start studying", "start study"],
+    "sleep_mode": ["sleep mode", "bedtime mode"],
+    "work_mode": ["work mode", "start work mode"],
+    "morning": ["morning routine", "start my day routine"],
 }
 
 def detect_offline_command(msg: str):
@@ -593,31 +600,42 @@ INTENT_CONFIRMATIONS = {
 # stores pending confirmations per device
 PENDING_CONFIRMATIONS = {}
 
-def check_user_confirmation(msg: str, device_id: str) -> tuple | None:
+def check_user_confirmation(msg: str, device_id: str):
     """Check if user is confirming or denying a pending action."""
-    if device_id not in PENDING_CONFIRMATIONS:
+    pending = PENDING_CONFIRMATIONS.get(device_id)
+    if not pending:
         return None
 
-    pending = PENDING_CONFIRMATIONS[device_id]
     msg_lower = msg.lower().strip()
 
     positive = [
         "yes", "yeah", "yep", "sure", "ok", "okay", "go ahead",
         "please do", "do it", "proceed", "definitely", "of course",
-        "yes please", "yh", "aye", "right", "correct"
+        "yes please", "yh", "aye", "alright", "fine", "do that",
+        "open it", "yes open", "go on"
     ]
     negative = [
         "no", "nope", "don't", "cancel", "stop", "never mind",
-        "nah", "not now", "skip it", "forget it", "no thanks"
+        "nah", "not now", "skip it", "forget it", "no thanks",
+        "don't do that", "leave it"
     ]
 
-    if any(word == msg_lower or msg_lower.startswith(word) for word in positive):
+    is_positive = any(
+        msg_lower == w or msg_lower.startswith(w + " ")
+        for w in positive
+    )
+    is_negative = any(
+        msg_lower == w or msg_lower.startswith(w + " ")
+        for w in negative
+    )
+
+    if is_positive:
         action = pending.get("action")
         follow_up = pending.get("follow_up", "Done.")
         del PENDING_CONFIRMATIONS[device_id]
         return follow_up, action
 
-    if any(word == msg_lower or msg_lower.startswith(word) for word in negative):
+    if is_negative:
         del PENDING_CONFIRMATIONS[device_id]
         return "No problem. Let me know if you need anything else.", None
 
@@ -625,7 +643,6 @@ def check_user_confirmation(msg: str, device_id: str) -> tuple | None:
 
 
 def build_smart_action(intent: str, msg: str, personality: dict) -> tuple:
-    """Build a response and action trigger based on detected intent."""
     name = personality.get("nickname") or personality.get("name", "")
     greeting = f"{name}, " if name else ""
     msg_lower = msg.lower()
@@ -634,32 +651,59 @@ def build_smart_action(intent: str, msg: str, personality: dict) -> tuple:
     question = config.get("question")
     action = config.get("action")
 
-    # intents that need no confirmation - just do it
     no_confirm_intents = {
         "intent_navigate", "intent_battery", "intent_sleep",
-        "intent_weather", "intent_news"
+        "intent_weather", "intent_news", "intent_brightness",
+        "intent_volume", "intent_lock", "intent_screenshot"
     }
 
     if intent in no_confirm_intents or question is None:
-        # handle brightness direction
         if intent == "intent_brightness":
             if any(w in msg_lower for w in
-                   ["bright", "light", "see", "low", "dim"]):
-                action = "decrease brightness"
+                   ["too bright", "hurting", "dim", "dark", "lower"]):
+                action = "min brightness"
+                reply = f"{greeting}dimming your screen now."
             else:
-                action = "increase brightness"
-        # handle volume direction
-        elif intent == "intent_volume":
-            if any(w in msg_lower for w in ["loud", "high", "up", "louder"]):
-                action = "volume up"
+                action = "max brightness"
+                reply = f"{greeting}increasing brightness now."
+            return reply, action
+
+        if intent == "intent_volume":
+            if any(w in msg_lower for w in
+                   ["too loud", "lower", "down", "quiet", "quieter"]):
+                action = "min volume"
+                reply = f"{greeting}lowering the volume."
             else:
-                action = "volume down"
+                action = "max volume"
+                reply = f"{greeting}turning up the volume."
+            return reply, action
+
+        if intent == "intent_sleep":
+            reply = (
+                f"Goodnight {name}. " if name else "Goodnight. "
+            ) + "Setting up sleep mode for you now."
+            return reply, "sleep mode"
+
+        if intent == "intent_lock":
+            return f"{greeting}locking your phone now.", "lock my phone"
+
+        if intent == "intent_screenshot":
+            return f"{greeting}taking a screenshot now.", "take screenshot"
+
+        if intent == "intent_battery":
+            return f"{greeting}checking your battery.", "battery level"
+
+        if intent == "intent_weather":
+            return f"{greeting}checking the weather for you.", "weather"
+
+        if intent == "intent_news":
+            return f"{greeting}getting the latest news.", "latest news"
 
         follow_up = config.get("follow_up")
         reply = follow_up if follow_up else "On it."
         return reply, action
 
-    # for call intent, extract the name if given
+    # call intent
     if intent == "intent_call":
         for skip in ["i need to call", "i want to call", "call",
                      "can you call", "please call", "make a call to"]:
@@ -667,38 +711,91 @@ def build_smart_action(intent: str, msg: str, personality: dict) -> tuple:
                 contact = msg_lower.replace(skip, "").strip()
                 if contact and len(contact) > 1:
                     return (
-                        f"{greeting}Should I call {contact} for you?",
+                        f"{greeting}calling {contact} for you.",
                         f"call {contact}"
                     )
+        return f"{greeting}who would you like me to call?", None
 
-    # for open app intent, extract the app name
+    # open app intent
     if intent == "intent_open_app":
         for skip in ["i want to use", "i need to use", "can you open",
-                     "open", "take me to", "bring up", "launch",
-                     "i need to go to", "i want to go to"]:
+                     "take me to", "bring up", "i need to go to",
+                     "i want to go to", "open"]:
             if skip in msg_lower:
                 app = msg_lower.replace(skip, "").strip()
                 app = app.replace("the", "").replace("app", "").strip()
                 if app and len(app) > 1:
+                    PENDING_CONFIRMATIONS[
+                        msg  # placeholder, device_id passed separately
+                    ] = {
+                        "intent": intent,
+                        "action": f"open {app}",
+                        "follow_up": f"Opening {app}."
+                    }
                     return (
-                        f"{greeting}Should I open {app} for you?",
-                        f"open {app}"
+                        f"{greeting}should I open {app} for you?",
+                        None
                     )
 
-    # for task intent, extract the task content
+    # whatsapp intent
+    if intent == "intent_whatsapp":
+        PENDING_CONFIRMATIONS["__pending__"] = {
+            "intent": intent,
+            "action": "open whatsapp",
+            "follow_up": "WhatsApp is open. Go ahead and send your message."
+        }
+        return (
+            f"{greeting}should I open WhatsApp for you?",
+            None
+        )
+
+    # focus intent
+    if intent == "intent_focus":
+        PENDING_CONFIRMATIONS["__pending__"] = {
+            "intent": intent,
+            "action": "strict mode focus",
+            "follow_up": "Focus mode is active. Distractions will be limited."
+        }
+        return (
+            f"{greeting}should I activate focus mode to help you stay on track?",
+            None
+        )
+
+    # task intent
     if intent == "intent_task":
         for skip in ["i need to remember to", "don't let me forget to",
                      "remind me about", "i have to", "i should",
-                     "i must", "i need to do", "remind me to"]:
+                     "i must", "i need to do", "remind me to",
+                     "note that"]:
             if skip in msg_lower:
                 task = msg_lower.replace(skip, "").strip()
                 if task and len(task) > 2:
+                    PENDING_CONFIRMATIONS["__pending__"] = {
+                        "intent": intent,
+                        "action": f"add task {task}",
+                        "follow_up": f"Task added: {task}."
+                    }
                     return (
-                        f"{greeting}Should I add '{task}' to your tasks?",
-                        f"add task {task}"
+                        f"{greeting}should I add '{task}' to your tasks?",
+                        None
                     )
 
-    # default confirmation question
+    # music intent
+    if intent == "intent_music":
+        PENDING_CONFIRMATIONS["__pending__"] = {
+            "intent": intent,
+            "action": "open spotify",
+            "follow_up": "Opening your music."
+        }
+        return f"{greeting}should I open your music app?", None
+
+    # alarm intent
+    if intent == "intent_alarm":
+        return (
+            f"{greeting}what time should I set the alarm for?",
+            None
+        )
+
     return f"{greeting}{question}", None
 
 # ================= MODEL ROUTER =================
