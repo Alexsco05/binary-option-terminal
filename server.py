@@ -17,18 +17,29 @@ BOT_NAME = "Gideon"
 
 GROQ_KEYS = [
     os.getenv("GROQ_KEY_1", ""),
-    os.getenv("GROQ_KEY_2", ""),
-    os.getenv("GROQ_KEY_3", ""),
-    os.getenv("GROQ_KEY_4", ""),
+    os.getenv("GROQ_KEY_2", "")
 ]
 
 OPENROUTER_KEYS = [
     os.getenv("OPENROUTER_KEY_1", ""),
-    os.getenv("OPENROUTER_KEY_2", ""),
+    os.getenv("OPENROUTER_KEY_2", "")
 ]
 
-GEMINI_KEY = os.getenv("GEMINI_KEY", "")
-COHERE_KEY = os.getenv("COHERE_KEY", "")
+GEMINI_KEY = [
+    os.getenv("GEMINI_KEY_1", ""),
+    os.getenv("GEMINI_KEY_2", "")
+]
+
+MISTRAL_KEY = [
+    os.getenv("MISTRAL_KEY_1", ""),
+    os.getenv("MISTRAL_KEY_2", "")
+]
+
+COHERE_KEY = [
+    os.getenv("COHERE_KEY_1", ""),
+    os.getenv("COHERE_KEY_2", "")
+]
+
 WEATHER_KEY = os.getenv("WEATHER_KEY", "")
 NEWS_KEY = os.getenv("NEWS_KEY", "")
 
@@ -1108,7 +1119,7 @@ def get_weather(city: str = "") -> str:
                 f"humidity {humidity}%."
             )
     except Exception as e:
-                print(f"[Weather] Error: {e}")
+        print(f"[Weather] Error: {e}")
     return ""
 
 
