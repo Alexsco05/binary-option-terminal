@@ -1372,12 +1372,14 @@ def run():
     action = data.get("action", "process")
     msg = data.get("data", "") or data.get("message", "")
     user_name = data.get("user_name", "User")
+    nickname = data.get("nickname", user_name)
     device_id = data.get("device_id", "default")
 
     # sanitize inputs
     msg = str(msg)[:2000].strip()
     device_id = str(device_id)[:100].strip()
     user_name = clean_name(str(user_name)[:100]) or "User"
+    nickname = clean_name(str(nickname)[:100]) or user_name
 
     if not device_id:
         device_id = "default"
@@ -1390,6 +1392,14 @@ def run():
 
     try:
         if action == "process":
+           # always sync the name before processing
+            if nickname and nickname != "User":
+                personality = load_personality(device_id)
+                if personality.get("nickname", "User") != nickname:
+                    personality["nickname"] = nickname
+                    personality["name"] = nickname
+                    save_personality(personality, device_id)
+
             reply, action_trigger = process(msg, device_id)
             response = {"reply": reply or "Done"}
             if action_trigger and action_trigger != "None":
