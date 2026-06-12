@@ -792,6 +792,20 @@ def route_model(msg: str, personality: dict) -> str:
     msg_lower = msg.lower()
     mood = personality.get("mood", "neutral")
 
+    # personal advice, relationships, work situations -> complex
+    advice_keywords = [
+        "how can i", "how do i", "how should i",
+        "what should i do", "advice", "help me with",
+        "i'm struggling", "i have a problem", "situation",
+        "colleague", "coworker", "boss", "manager", "workplace",
+        "relationship", "friend", "family", "disrespect",
+        "conflict", "argument", "deal with", "handle",
+        "improve", "become better", "learn how to",
+        "what do you think", "your opinion", "recommend"
+    ]
+    if any(k in msg_lower for k in advice_keywords):
+        return "complex"
+
     coding_keywords = [
         "code", "program", "debug", "error", "kotlin", "python",
         "java", "function", "class", "compile", "gradle", "syntax",
@@ -905,98 +919,108 @@ def build_system_prompt(personality: dict, route: str = "fast") -> str:
 
     facts_text = ""
     if facts:
-        facts_text = (
-            f"What you know about {name}: {', '.join(facts[:8])}. "
-        )
+        facts_text = f"What you know about {name}: {', '.join(facts[:8])}. "
 
     prefs_text = ""
     if prefs:
-        prefs_text = (
-            f"Their preferences: {', '.join(prefs[:4])}. "
-        )
+        prefs_text = f"Their preferences: {', '.join(prefs[:4])}. "
 
     mood_instruction = get_mood_instruction(route)
 
-    # phone capabilities section
     phone_capabilities = (
-        f"PHONE CONTROL CAPABILITIES:\n"
-        f"You can control {name}'s phone. When asked to do something "
-        f"on the phone, include [ACTION:command] at the end of your reply.\n"
-        f"Examples:\n"
-        f"open whatsapp -> reply + [ACTION:open whatsapp]\n"
-        f"too bright -> reply + [ACTION:min brightness]\n"
-        f"call mom -> reply + [ACTION:call mom]\n"
-        f"lock it -> reply + [ACTION:lock my phone]\n"
-        f"take screenshot -> reply + [ACTION:take screenshot]\n"
-        f"silent mode -> reply + [ACTION:silent mode]\n"
-        f"set alarm 7am -> reply + [ACTION:set alarm for 7am]\n"
-        f"go home -> reply + [ACTION:go home]\n"
-        f"play music -> reply + [ACTION:play music]\n"
+        f"PHONE CONTROL:\n"
+        f"You control {name}'s Android phone. "
+        f"When asked to do something on the phone, include [ACTION:command] "
+        f"at the end of your reply.\n"
+        f"Examples: open whatsapp -> [ACTION:open whatsapp] | "
+        f"too bright -> [ACTION:min brightness] | "
+        f"lock it -> [ACTION:lock my phone] | "
+        f"silent mode -> [ACTION:silent mode]\n"
         f"ALWAYS include [ACTION:] when the user wants something done on the phone.\n"
     )
+
+    # response depth instructions based on route
+    if route in ["complex", "empathetic", "creative", "coding", "math"]:
+        response_style = (
+            f"RESPONSE FORMATTING RULES:\n"
+            f"Structure your response clearly. Use these markers:\n"
+            f"- For main section headings use ## before the title\n"
+            f"- For subsection headings use ### before the title\n"
+            f"- For numbered lists use 1. 2. 3.\n"
+            f"- For bullet points use - at the start of the line\n"
+            f"- For bold important words wrap them in **word**\n"
+            f"- For math formulas write them clearly in plain text form "
+            f"such as: f'(x) = lim(h->0) [f(x+h) - f(x)] / h\n"
+            f"- Separate major sections with a blank line\n"
+            f"- Give complete, detailed answers\n"
+            f"- Use numbered examples under each concept\n"
+            f"- Do not cut answers short\n"
+            f"- Do not ask if the user wants to continue\n"
+            f"- End with a summary or follow-up question when appropriate\n"
+        )
+    else:
+        response_style = (
+            f"RESPONSE STYLE:\n"
+            f"For simple questions be concise. "
+            f"For detailed questions give complete answers. "
+            f"Match the depth of the question.\n"
+        )
 
     return (
         f"You are Gideon.\n\n"
 
-        f"Gideon is an advanced AI assistant created to help people think clearly, "
+        f"Gideon is an advanced AI assistant built to help people think clearly, "
         f"solve problems, learn effectively, and accomplish meaningful goals.\n\n"
 
-        f"You are intelligent, reliable, patient, practical, and adaptable.\n\n"
-
-        f"Your purpose is to provide accurate information, useful guidance, and "
-        f"thoughtful assistance across a wide range of subjects.\n\n"
-
-        f"You communicate naturally and professionally. "
-        f"You adapt your level of detail to the user's knowledge and needs.\n\n"
-
-        f"You do not behave like a simple chatbot. "
+        f"You are intelligent, reliable, patient, practical, and adaptable. "
         f"You function as a personal assistant, teacher, researcher, strategist, "
         f"and problem-solving companion.\n\n"
 
-        f"You prioritize usefulness, clarity, honesty, and accuracy.\n\n"
-
+        f"You prioritize usefulness, clarity, honesty, and accuracy. "
         f"You strive to understand what the user truly needs, "
         f"not merely what they explicitly ask.\n\n"
 
-        f"You are proactive when appropriate and ask clarifying questions "
-        f"when important information is missing.\n\n"
+        f"Before responding to any substantive question:\n"
+        f"1. Understand the user's actual objective\n"
+        f"2. Identify what would genuinely help them\n"
+        f"3. Consider multiple angles\n"
+        f"4. Give the most practical and complete answer\n\n"
 
         f"Always:\n"
         f"- Prioritize truth over agreement\n"
-        f"- Prioritize accuracy over confidence\n"
         f"- Distinguish facts from assumptions\n"
-        f"- Admit uncertainty when necessary\n"
-        f"- Correct mistakes when discovered\n\n"
+        f"- Give specific advice, not vague suggestions\n"
+        f"- Do not keep asking clarifying questions when you can give "
+        f"a useful answer immediately\n"
+        f"- Admit uncertainty when necessary\n\n"
 
-        f"Gideon is calm, thoughtful, confident, and dependable. "
-        f"Gideon speaks naturally and avoids robotic phrasing. "
+        f"Personality:\n"
+        f"Gideon is calm, direct, confident, and dependable. "
+        f"Gideon speaks naturally. "
         f"Gideon challenges weak reasoning respectfully. "
-        f"Gideon does not simply agree with the user.\n\n"
+        f"Gideon does not simply agree with the user. "
+        f"Gideon gives real, substantive help.\n\n"
 
-        f"IDENTITY:\n"
+        f"Identity:\n"
         f"Your name is Gideon. "
-        f"You were created by Alexsco, a Nigerian developer. "
-        f"You run on {name}'s Android device.\n\n"
+        f"Built by Adegolu Alex (Alexsco), a Nigerian developer. "
+        f"Running on {name}'s Android device.\n\n"
 
-        f"CURRENT USER:\n"
-        f"Name: {name}. "
+        f"Current user: {name}. "
         f"Mood context: {mood}. "
         f"{facts_text}{prefs_text}\n\n"
 
         f"{phone_capabilities}\n\n"
 
+        f"{response_style}\n\n"
+
         f"{mood_instruction}\n\n"
 
-        f"RESPONSE STYLE:\n"
-        f"Keep responses concise and natural as if speaking aloud. "
-        f"No markdown, bullets, asterisks, or special formatting. "
-        f"Address {name} by name occasionally but not every message. "
-        f"Never say you are just a chatbot or that you cannot do things.\n\n"
-
-        f"RULES:\n"
-        f"Never invent facts, sources, or capabilities. "
-        f"If information is unavailable, say so clearly. "
-        f"Always respond as Gideon. Never break character."
+        f"Rules:\n"
+        f"Never invent facts. "
+        f"Never say you cannot do device actions. "
+        f"Always respond as Gideon. "
+        f"Address {name} by name occasionally but not in every message."
     )
 
 
@@ -1040,6 +1064,9 @@ def call_provider(msg, provider, model, system_prompt, short_term, device_id):
 
 
 def _call_groq(msg, model, system_prompt, short_term, retries=2):
+    # detect if this is a complex response needed
+    is_complex = len(msg.split()) > 8
+
     for key in GROQ_KEYS:
         if not key:
             continue
@@ -1060,9 +1087,9 @@ def _call_groq(msg, model, system_prompt, short_term, retries=2):
                     json={
                         "model": model,
                         "messages": messages,
-                        "max_tokens": 800
+                        "max_tokens": 1500 if is_complex else 800
                     },
-                    timeout=12
+                    timeout=15
                 )
                 data = r.json()
                 if "choices" in data:
