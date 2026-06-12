@@ -145,6 +145,12 @@ def load_personality(device_id: str):
         path = get_user_files(device_id)["personality"]
         with open(path, "r") as f:
             return json.load(f)
+        # sanitize name fields to remove any corruption
+        data["name"] = clean_name(data.get("name", "User")) or "User"
+        data["nickname"] = clean_name(
+            data.get("nickname", "")
+        ) or data["name"]
+        return data
     except Exception:
         return {
             "name": "User",
@@ -519,12 +525,15 @@ INTENT_PATTERNS = {
         "secure it for me"
     ],
     "intent_sleep": [
-        "i'm going to sleep", "time for bed",
-        "about to sleep", "heading to bed",
-        "i'm sleepy", "turning in for the night",
-        "i want to sleep", "setting up for sleep",
-        "help me sleep", "prepare for bed"
-    ],
+    "i'm going to sleep", "time for bed",
+    "about to sleep", "heading to bed",
+    "i'm sleepy", "turning in for the night",
+    "i want to sleep", "i need to sleep",
+    "setting up for sleep",
+    "help me sleep", "prepare for bed",
+    "i need rest", "i'm going to rest",
+    "let me sleep"
+],
     "intent_weather": [
         "is it going to rain", "should i carry an umbrella",
         "what's the weather like", "how's the weather",
@@ -1341,8 +1350,8 @@ def run():
         elif action == "clear_memory":
             save_history([], device_id)
             save_personality({
-                "name": user_name,
-                "nickname": user_name,
+                "name": "User",
+                "nickname": "User",
                 "facts": [],
                 "preferences": [],
                 "people": [],
