@@ -1300,10 +1300,6 @@ def is_online():
 
 # ================= PROCESS =================
 def process(msg: str, device_id: str):
-
-clean_answer = latex_to_unicode(clean_answer)
-return clean_answer, action_trigger
-
     msg = msg.strip()
     if not msg:
         return "No input received.", None
@@ -1428,6 +1424,7 @@ return clean_answer, action_trigger
         answer = "I could not process that right now. Please try again."
 
     clean_answer, action_trigger = extract_action_trigger(answer)
+    clean_answer = latex_to_unicode(clean_answer)
 
     CACHE[cache_key] = clean_answer
     update_short_term(msg, clean_answer, device_id)
