@@ -1300,9 +1300,11 @@ def is_online():
 
 # ================= PROCESS =================
 def process(msg: str, device_id: str):
-    msg = msg.strip()
+
 clean_answer = latex_to_unicode(clean_answer)
 return clean_answer, action_trigger
+
+    msg = msg.strip()
     if not msg:
         return "No input received.", None
 
