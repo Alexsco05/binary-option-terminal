@@ -949,9 +949,14 @@ def build_system_prompt(personality: dict, route: str = "fast") -> str:
             f"- For numbered lists use 1. 2. 3.\n"
             f"- For bullet points use - at the start of the line\n"
             f"- For bold important words wrap them in **word**\n"
-            f"- For math formulas write them clearly in plain text form "
             f"such as: f'(x) = lim(h->0) [f(x+h) - f(x)] / h\n"
             f"- Separate major sections with a blank line\n"
+            f"- For any mathematical formula, equation, or expression, "
+            f"wrap it in backticks like this: `f'(x) = nx^(n-1)`\n"
+            f"- Never write formulas as plain paragraph text\n"
+            f"- Greek letters: write them as words, e.g. alpha, beta, theta, pi\n"
+            f"- Exponents: use ^ symbol, e.g. x^2 means x squared\n"
+            f"- Fractions: write as (top)/(bottom), e.g. (x+1)/(x-1)\n"
             f"- Give complete, detailed answers\n"
             f"- Use numbered examples under each concept\n"
             f"- Do not cut answers short\n"
@@ -1022,6 +1027,52 @@ def build_system_prompt(personality: dict, route: str = "fast") -> str:
         f"Always respond as Gideon. "
         f"Address {name} by name occasionally but not in every message."
     )
+
+def latex_to_unicode(text: str) -> str:
+    """Convert common LaTeX math to readable Unicode."""
+    replacements = [
+        (r'\frac{d}{dx}', 'd/dx'),
+        (r'\frac{1}{2}', '½'),
+        (r'\frac{1}{x}', '1/x'),
+        (r'\int', '∫'),
+        (r'\sum', '∑'),
+        (r'\lim', 'lim'),
+        (r'\sqrt', '√'),
+        (r'\infty', '∞'),
+        (r'\theta', 'θ'),
+        (r'\alpha', 'α'),
+        (r'\beta', 'β'),
+        (r'\pi', 'π'),
+        (r'\Delta', 'Δ'),
+        (r'\delta', 'δ'),
+        (r'\epsilon', 'ε'),
+        (r'\lambda', 'λ'),
+        (r'\mu', 'μ'),
+        (r'\sigma', 'σ'),
+        (r'\omega', 'ω'),
+        (r'\times', '×'),
+        (r'\div', '÷'),
+        (r'\neq', '≠'),
+        (r'\leq', '≤'),
+        (r'\geq', '≥'),
+        (r'\approx', '≈'),
+        (r'\rightarrow', '→'),
+        (r'\leftarrow', '←'),
+        (r'\Rightarrow', '⇒'),
+        (r'\pm', '±'),
+        (r'^{2}', '²'),
+        (r'^{3}', '³'),
+        (r'^{n}', 'ⁿ'),
+        (r'^2', '²'),
+        (r'^3', '³'),
+        (r'_{0}', '₀'),
+        (r'_{1}', '₁'),
+        (r'_{2}', '₂'),
+        (r'_{n}', 'ₙ'),
+    ]
+    for latex, unicode_char in replacements:
+        text = text.replace(latex, unicode_char)
+    return text
 
 
 # ================= AI CALLS =================
@@ -1250,6 +1301,8 @@ def is_online():
 # ================= PROCESS =================
 def process(msg: str, device_id: str):
     msg = msg.strip()
+clean_answer = latex_to_unicode(clean_answer)
+return clean_answer, action_trigger
     if not msg:
         return "No input received.", None
 
