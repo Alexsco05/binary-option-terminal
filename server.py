@@ -1,16 +1,17 @@
 # ================= GIDEON BACKEND =================
 # Creator: Alexsco (Adegolu Alex)
-# Version: 8.0 - Intent-First + Secure
+# Version: 8.0 - Intent-First + Secure + TTS
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 import os
 import requests
 import json
 import threading
 import datetime
 import re
-import hashlib
 import time
+import base64
+import tempfile
 from collections import defaultdict
 
 app = Flask(__name__)
@@ -34,6 +35,7 @@ GEMINI_KEY = os.getenv("GEMINI_KEY", "")
 COHERE_KEY = os.getenv("COHERE_KEY", "")
 WEATHER_KEY = os.getenv("WEATHER_KEY", "")
 NEWS_KEY = os.getenv("NEWS_KEY", "")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # ================= RATE LIMITING =================
 REQUEST_COUNTS = defaultdict(list)
@@ -45,19 +47,15 @@ def is_rate_limited(device_id: str) -> bool:
     now = time.time()
     minute_ago = now - 60
     hour_ago = now - 3600
-
     counts = REQUEST_COUNTS[device_id]
     counts = [t for t in counts if t > hour_ago]
     REQUEST_COUNTS[device_id] = counts
-
     per_minute = sum(1 for t in counts if t > minute_ago)
     per_hour = len(counts)
-
     if per_minute >= RATE_LIMIT_PER_MINUTE:
         return True
     if per_hour >= RATE_LIMIT_PER_HOUR:
         return True
-
     REQUEST_COUNTS[device_id].append(now)
     return False
 
@@ -99,12 +97,6 @@ MODELS = {
                     "model": "qwen/qwen-2-math-72b-instruct:free"},
         "fallback": {"provider": "groq",
                      "model": "llama-3.3-70b-versatile"}
-    },
-    "vision": {
-        "primary": {"provider": "gemini",
-                    "model": "gemini-1.5-flash"},
-        "fallback": {"provider": "groq",
-                     "model": "llama-3.1-8b-instant"}
     },
     "coding": {
         "primary": {"provider": "openrouter",
@@ -161,6 +153,63 @@ def clean_name(raw: str) -> str:
     return cleaned[:50]
 
 
+# ================= LATEX TO UNICODE =================
+def latex_to_unicode(text: str) -> str:
+    replacements = [
+        (r'\frac{d}{dx}', 'd/dx'),
+        (r'\frac{1}{2}', '½'),
+        (r'\frac{1}{x}', '1/x'),
+        (r'\int', '∫'),
+        (r'\sum', '∑'),
+        (r'\lim_{', 'lim('),
+        (r'\lim', 'lim'),
+        (r'\sqrt', '√'),
+        (r'\infty', '∞'),
+        (r'\theta', 'θ'),
+        (r'\alpha', 'α'),
+        (r'\beta', 'β'),
+        (r'\gamma', 'γ'),
+        (r'\pi', 'π'),
+        (r'\Delta', 'Δ'),
+        (r'\delta', 'δ'),
+        (r'\epsilon', 'ε'),
+        (r'\lambda', 'λ'),
+        (r'\mu', 'μ'),
+        (r'\sigma', 'σ'),
+        (r'\omega', 'ω'),
+        (r'\times', '×'),
+        (r'\div', '÷'),
+        (r'\neq', '≠'),
+        (r'\leq', '≤'),
+        (r'\geq', '≥'),
+        (r'\approx', '≈'),
+        (r'\rightarrow', '→'),
+        (r'\leftarrow', '←'),
+        (r'\Rightarrow', '⇒'),
+        (r'\pm', '±'),
+        (r'^{2}', '²'),
+        (r'^{3}', '³'),
+        (r'^{n}', 'ⁿ'),
+        (r'^2', '²'),
+        (r'^3', '³'),
+        (r'_{0}', '₀'),
+        (r'_{1}', '₁'),
+        (r'_{2}', '₂'),
+        (r'_{n}', 'ₙ'),
+        (r'\left(', '('),
+        (r'\right)', ')'),
+        (r'\cdot', '·'),
+        (r'\ldots', '...'),
+        (r'\to', '→'),
+    ]
+    for latex, uni in replacements:
+        text = text.replace(latex, uni)
+    # remove remaining backslash commands
+    text = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', text)
+    text = re.sub(r'\\[a-zA-Z]+', '', text)
+    return text
+
+
 # ================= HISTORY =================
 def load_history(device_id: str):
     try:
@@ -177,7 +226,7 @@ def save_history(history: list, device_id: str):
         with open(path, "w") as f:
             json.dump(history, f, indent=2)
     except Exception as e:
-        print(f"[Memory] Failed to save history: {e}")
+        print(f"[Memory] Save history error: {e}")
 
 
 # ================= PERSONALITY =================
@@ -210,12 +259,14 @@ def save_personality(data: dict, device_id: str):
         if "name" in data:
             data["name"] = clean_name(data["name"]) or "User"
         if "nickname" in data:
-            data["nickname"] = clean_name(data["nickname"]) or data.get("name", "User")
+            data["nickname"] = clean_name(
+                data.get("nickname", "")
+            ) or data.get("name", "User")
         path = get_user_files(device_id)["personality"]
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
-        print(f"[Memory] Failed to save personality: {e}")
+        print(f"[Memory] Save personality error: {e}")
 
 
 # ================= MEMORY UPDATES =================
@@ -248,7 +299,7 @@ def summarize_history(history: list, device_id: str):
             for h in older
         ])
         summary = call_groq_raw(
-            f"Summarize this conversation into a short paragraph: {older_text}"
+            f"Summarize this conversation briefly: {older_text}"
         )
         if summary:
             return [{
@@ -257,7 +308,7 @@ def summarize_history(history: list, device_id: str):
                 "gideon": summary
             }] + recent
     except Exception as e:
-        print(f"[Memory] Summarization failed: {e}")
+        print(f"[Memory] Summarize error: {e}")
     return history[-40:]
 
 
@@ -277,11 +328,11 @@ def _extract_facts_thread(user_msg: str, device_id: str):
 
         result = call_groq_raw(
             f"Extract personal facts about {name} from this message. "
-            f"Return ONLY a valid JSON object with these exact keys: "
+            f"Return ONLY valid JSON with keys: "
             f"facts, preferences, people, locations, mood. "
             f"Each key except mood is a list of short strings. "
-            f"mood is a single word. "
-            f"If nothing return: "
+            f"mood is one word. "
+            f"If nothing to extract return: "
             f'{{"facts":[],"preferences":[],"people":[],"locations":[],"mood":"neutral"}} '
             f"Message: {user_msg}"
         )
@@ -289,8 +340,7 @@ def _extract_facts_thread(user_msg: str, device_id: str):
         if not result:
             return
 
-        clean = result.strip()
-        clean = clean.replace("```json", "").replace("```", "").strip()
+        clean = result.strip().replace("```json", "").replace("```", "").strip()
         start = clean.find("{")
         end = clean.rfind("}") + 1
         if start == -1 or end == 0:
@@ -320,7 +370,7 @@ def _extract_facts_thread(user_msg: str, device_id: str):
         save_personality(personality, device_id)
 
     except Exception as e:
-        print(f"[Memory] Fact extraction failed: {e}")
+        print(f"[Memory] Fact extraction error: {e}")
 
 
 # ================= ACTION TRIGGER PARSER =================
@@ -474,11 +524,10 @@ def build_action_trigger(offline_type: str, msg: str) -> str:
         "work_mode":     "work mode",
         "morning":       "morning routine",
     }
-
     return action_map.get(offline_type, msg_lower)
 
 
-# ================= INTENT UNDERSTANDING =================
+# ================= INTENT PATTERNS =================
 INTENT_PATTERNS = {
     "intent_whatsapp": [
         "send a message", "send a text", "text someone",
@@ -530,11 +579,6 @@ INTENT_PATTERNS = {
         "too dim", "can't see the screen", "make it brighter",
         "increase the light", "screen is too dark",
         "brighten it up"
-    ],
-    "intent_volume_down": [
-        "too loud", "turn it down", "lower the sound",
-        "make it quieter", "sound is too high",
-        "reduce the volume", "lower volume"
     ],
     "intent_volume_up": [
         "can't hear", "increase the sound",
@@ -607,7 +651,6 @@ def check_user_confirmation(msg: str, device_id: str):
     if not pending:
         return None
 
-    # expire confirmations after 2 minutes
     if time.time() - pending.get("timestamp", 0) > 120:
         del PENDING_CONFIRMATIONS[device_id]
         return None
@@ -640,7 +683,7 @@ def check_user_confirmation(msg: str, device_id: str):
         action = pending["action"]
         follow_up = pending["follow_up"]
         del PENDING_CONFIRMATIONS[device_id]
-        print(f"[Confirm] Confirmed. Executing: {action}")
+        print(f"[Confirm] Confirmed: {action}")
         return follow_up, action
 
     if is_negative:
@@ -659,9 +702,8 @@ def build_intent_response(
     n = f"{name}, " if name else ""
     msg_lower = msg.lower()
 
-    print(f"[Intent] Detected: {intent} for user: '{name}'")
+    print(f"[Intent] {intent} for '{name}'")
 
-    # direct actions (no confirmation)
     if intent == "intent_brightness_down":
         return f"{n}adjusting your screen brightness now.", "min brightness"
 
@@ -681,10 +723,10 @@ def build_intent_response(
         return f"{n}locking your phone now.", "lock my phone"
 
     if intent == "intent_screenshot":
-        return f"{n}taking a screenshot now.", "take screenshot"
+        return f"{n}taking a screenshot.", "take screenshot"
 
     if intent == "intent_weather":
-        return f"{n}checking the weather for you.", "weather"
+        return f"{n}checking the weather.", "weather"
 
     if intent == "intent_news":
         return f"{n}getting the latest news.", "latest news"
@@ -692,17 +734,19 @@ def build_intent_response(
     if intent == "intent_sleep":
         store_pending(
             device_id, "sleep mode",
-            f"Sleep mode is set. Goodnight{', ' + name if name else ''}."
+            f"Sleep mode set. Goodnight{', ' + name if name else ''}."
         )
         return (
-            f"Should I set up sleep mode for you{', ' + name if name else ''}? "
-            f"I will dim the screen, lower volume, and turn on do not disturb."
+            f"Should I set up sleep mode"
+            f"{', ' + name if name else ''}? "
+            f"I will dim the screen, lower volume, "
+            f"and turn on do not disturb."
         ), None
 
     if intent == "intent_focus":
         store_pending(
             device_id, "strict mode focus",
-            "Focus mode is active. Distractions will be limited."
+            "Focus mode is active. Distractions limited."
         )
         return (
             f"{n}should I activate focus mode? "
@@ -740,10 +784,10 @@ def build_intent_response(
                 if app and len(app) > 1:
                     store_pending(
                         device_id, f"open {app}",
-                        f"Opening {app} for you."
+                        f"Opening {app}."
                     )
                     return f"{n}should I open {app} for you?", None
-        return f"{n}which app would you like me to open?", None
+        return f"{n}which app should I open?", None
 
     if intent == "intent_music":
         store_pending(
@@ -779,9 +823,7 @@ def build_intent_response(
                         device_id, f"add task {task}",
                         f"Task added: {task}."
                     )
-                    return (
-                        f"{n}should I add '{task}' to your tasks?"
-                    ), None
+                    return f"{n}should I add '{task}' to your tasks?", None
         return f"{n}what task should I add?", None
 
     return None, None
@@ -792,7 +834,6 @@ def route_model(msg: str, personality: dict) -> str:
     msg_lower = msg.lower()
     mood = personality.get("mood", "neutral")
 
-    # personal advice, relationships, work situations -> complex
     advice_keywords = [
         "how can i", "how do i", "how should i",
         "what should i do", "advice", "help me with",
@@ -825,7 +866,7 @@ def route_model(msg: str, personality: dict) -> str:
 
     humor_keywords = [
         "joke", "funny", "humor", "laugh", "roast",
-        "prank", "silly", "entertain", "riddle", "make me laugh"
+        "prank", "silly", "entertain", "riddle"
     ]
     if any(k in msg_lower for k in humor_keywords):
         return "creative"
@@ -876,35 +917,44 @@ def route_model(msg: str, personality: dict) -> str:
 
     return "fast"
 
-
 # ================= MOOD INSTRUCTION =================
 def get_mood_instruction(route: str) -> str:
     if route == "empathetic":
         return (
-            "The user may be feeling emotional. "
-            "Respond with warmth and genuine care. "
+            "The user may be emotional. "
+            "Respond with warmth. "
             "Validate feelings before offering solutions."
         )
     if route == "creative":
-        return (
-            "The user is in a light mood. "
-            "Be engaging and natural."
-        )
+        return "Be engaging and natural. Light energy."
     if route == "complex":
         return (
-            "Give a thorough, well-reasoned response. "
-            "Be clear but conversational."
+            "Give a thorough, well-structured response. "
+            "Use ## for main sections, ### for subsections, "
+            "- for bullet points, 1. for numbered lists, "
+            "**word** for bold. "
+            "Do not cut answers short. "
+            "Do not ask if the user wants to continue."
         )
     if route == "coding":
         return (
             "Be precise and practical. "
-            "Provide working examples."
+            "Use code blocks with backticks."
         )
+    if route == "math":
+    return (
+        "Show working clearly. "
+        "Use LaTeX notation for all formulas. "
+        "Wrap display math in $$ ... $$ blocks. "
+        "Wrap inline math in $ ... $. "
+        "Use ## for section titles and numbered lists for steps. "
+        "Example: The derivative is $$\\frac{d}{dx}x^2 = 2x$$"
+    )
     if route == "firm":
         return (
             "The user is being disrespectful. "
             "Respond calmly with self-respect. "
-            "Set a polite boundary and redirect."
+            "Set a polite boundary."
         )
     return ""
 
@@ -919,160 +969,82 @@ def build_system_prompt(personality: dict, route: str = "fast") -> str:
 
     facts_text = ""
     if facts:
-        facts_text = f"What you know about {name}: {', '.join(facts[:8])}. "
+        facts_text = f"Known about {name}: {', '.join(facts[:8])}. "
 
     prefs_text = ""
     if prefs:
-        prefs_text = f"Their preferences: {', '.join(prefs[:4])}. "
+        prefs_text = f"Preferences: {', '.join(prefs[:4])}. "
 
     mood_instruction = get_mood_instruction(route)
+
+    is_detailed = route in ["complex", "math", "coding", "empathetic", "creative"]
+
+    response_style = (
+        f"RESPONSE FORMATTING:\n"
+        f"Use ## for main headings, ### for subheadings.\n"
+        f"Use - for bullet points, 1. 2. 3. for numbered lists.\n"
+        f"Use **word** to bold important terms.\n"
+        f"Use backtick blocks for code and formulas.\n"
+        f"Give complete, detailed answers for complex questions.\n"
+        f"Do not use markdown asterisks for italics.\n"
+        f"Do not add [No phone action required] or similar notes.\n"
+    ) if is_detailed else (
+        f"RESPONSE STYLE:\n"
+        f"Concise and natural. Match depth to the question.\n"
+        f"For detailed questions use ## headings and structure.\n"
+        f"Do not add meta-notes about phone actions.\n"
+    )
 
     phone_capabilities = (
         f"PHONE CONTROL:\n"
         f"You control {name}'s Android phone. "
-        f"When asked to do something on the phone, include [ACTION:command] "
-        f"at the end of your reply.\n"
+        f"When asked to do something on the phone, "
+        f"append [ACTION:command] at the end.\n"
         f"Examples: open whatsapp -> [ACTION:open whatsapp] | "
         f"too bright -> [ACTION:min brightness] | "
         f"lock it -> [ACTION:lock my phone] | "
-        f"silent mode -> [ACTION:silent mode]\n"
-        f"ALWAYS include [ACTION:] when the user wants something done on the phone.\n"
+        f"take screenshot -> [ACTION:take screenshot]\n"
+        f"ALWAYS include [ACTION:] for phone commands. "
+        f"Never just talk about doing it.\n"
     )
-
-    # response depth instructions based on route
-    if route in ["complex", "empathetic", "creative", "coding", "math"]:
-        response_style = (
-            f"RESPONSE FORMATTING RULES:\n"
-            f"Structure your response clearly. Use these markers:\n"
-            f"- For main section headings use ## before the title\n"
-            f"- For subsection headings use ### before the title\n"
-            f"- For numbered lists use 1. 2. 3.\n"
-            f"- For bullet points use - at the start of the line\n"
-            f"- For bold important words wrap them in **word**\n"
-            f"such as: f'(x) = lim(h->0) [f(x+h) - f(x)] / h\n"
-            f"- Separate major sections with a blank line\n"
-            f"- For any mathematical formula, equation, or expression, "
-            f"wrap it in backticks like this: `f'(x) = nx^(n-1)`\n"
-            f"- Never write formulas as plain paragraph text\n"
-            f"- Greek letters: write them as words, e.g. alpha, beta, theta, pi\n"
-            f"- Exponents: use ^ symbol, e.g. x^2 means x squared\n"
-            f"- Fractions: write as (top)/(bottom), e.g. (x+1)/(x-1)\n"
-            f"- Give complete, detailed answers\n"
-            f"- Use numbered examples under each concept\n"
-            f"- Do not cut answers short\n"
-            f"- Do not ask if the user wants to continue\n"
-            f"- End with a summary or follow-up question when appropriate\n"
-        )
-    else:
-        response_style = (
-            f"RESPONSE STYLE:\n"
-            f"For simple questions be concise. "
-            f"For detailed questions give complete answers. "
-            f"Match the depth of the question.\n"
-        )
 
     return (
         f"You are Gideon.\n\n"
-
-        f"Gideon is an advanced AI assistant built to help people think clearly, "
-        f"solve problems, learn effectively, and accomplish meaningful goals.\n\n"
-
-        f"You are intelligent, reliable, patient, practical, and adaptable. "
-        f"You function as a personal assistant, teacher, researcher, strategist, "
-        f"and problem-solving companion.\n\n"
-
+        f"Gideon is an advanced AI assistant built to help people "
+        f"think clearly, solve problems, learn effectively, and "
+        f"accomplish meaningful goals.\n\n"
+        f"You are intelligent, reliable, patient, practical, "
+        f"and adaptable. You function as a personal assistant, "
+        f"teacher, researcher, strategist, and problem-solving "
+        f"companion.\n\n"
         f"You prioritize usefulness, clarity, honesty, and accuracy. "
-        f"You strive to understand what the user truly needs, "
-        f"not merely what they explicitly ask.\n\n"
-
-        f"Before responding to any substantive question:\n"
-        f"1. Understand the user's actual objective\n"
-        f"2. Identify what would genuinely help them\n"
-        f"3. Consider multiple angles\n"
-        f"4. Give the most practical and complete answer\n\n"
-
+        f"You understand what the user truly needs, not just what "
+        f"they explicitly ask.\n\n"
         f"Always:\n"
         f"- Prioritize truth over agreement\n"
         f"- Distinguish facts from assumptions\n"
         f"- Give specific advice, not vague suggestions\n"
-        f"- Do not keep asking clarifying questions when you can give "
-        f"a useful answer immediately\n"
+        f"- Give the full useful answer immediately\n"
         f"- Admit uncertainty when necessary\n\n"
-
-        f"Personality:\n"
-        f"Gideon is calm, direct, confident, and dependable. "
-        f"Gideon speaks naturally. "
-        f"Gideon challenges weak reasoning respectfully. "
-        f"Gideon does not simply agree with the user. "
-        f"Gideon gives real, substantive help.\n\n"
-
-        f"Identity:\n"
-        f"Your name is Gideon. "
-        f"Built by Adegolu Alex (Alexsco), a Nigerian developer. "
+        f"Personality: Gideon is calm, direct, confident, "
+        f"and dependable. Speaks naturally. Challenges weak "
+        f"reasoning respectfully. Does not simply agree.\n\n"
+        f"Identity: Built by Alexsco, a Nigerian developer. "
         f"Running on {name}'s Android device.\n\n"
-
         f"Current user: {name}. "
-        f"Mood context: {mood}. "
+        f"Mood: {mood}. "
         f"{facts_text}{prefs_text}\n\n"
-
         f"{phone_capabilities}\n\n"
-
         f"{response_style}\n\n"
-
         f"{mood_instruction}\n\n"
-
         f"Rules:\n"
         f"Never invent facts. "
         f"Never say you cannot do device actions. "
+        f"Never add meta-commentary like "
+        f"'[No phone action required]' in responses. "
         f"Always respond as Gideon. "
-        f"Address {name} by name occasionally but not in every message."
+        f"Address {name} by name occasionally, not every message."
     )
-
-def latex_to_unicode(text: str) -> str:
-    """Convert common LaTeX math to readable Unicode."""
-    replacements = [
-        (r'\frac{d}{dx}', 'd/dx'),
-        (r'\frac{1}{2}', '½'),
-        (r'\frac{1}{x}', '1/x'),
-        (r'\int', '∫'),
-        (r'\sum', '∑'),
-        (r'\lim', 'lim'),
-        (r'\sqrt', '√'),
-        (r'\infty', '∞'),
-        (r'\theta', 'θ'),
-        (r'\alpha', 'α'),
-        (r'\beta', 'β'),
-        (r'\pi', 'π'),
-        (r'\Delta', 'Δ'),
-        (r'\delta', 'δ'),
-        (r'\epsilon', 'ε'),
-        (r'\lambda', 'λ'),
-        (r'\mu', 'μ'),
-        (r'\sigma', 'σ'),
-        (r'\omega', 'ω'),
-        (r'\times', '×'),
-        (r'\div', '÷'),
-        (r'\neq', '≠'),
-        (r'\leq', '≤'),
-        (r'\geq', '≥'),
-        (r'\approx', '≈'),
-        (r'\rightarrow', '→'),
-        (r'\leftarrow', '←'),
-        (r'\Rightarrow', '⇒'),
-        (r'\pm', '±'),
-        (r'^{2}', '²'),
-        (r'^{3}', '³'),
-        (r'^{n}', 'ⁿ'),
-        (r'^2', '²'),
-        (r'^3', '³'),
-        (r'_{0}', '₀'),
-        (r'_{1}', '₁'),
-        (r'_{2}', '₂'),
-        (r'_{n}', 'ₙ'),
-    ]
-    for latex, unicode_char in replacements:
-        text = text.replace(latex, unicode_char)
-    return text
 
 
 # ================= AI CALLS =================
@@ -1102,7 +1074,8 @@ def call_groq_raw(prompt: str):
     return None
 
 
-def call_provider(msg, provider, model, system_prompt, short_term, device_id):
+def call_provider(msg, provider, model, system_prompt,
+                  short_term, device_id):
     if provider == "groq":
         return _call_groq(msg, model, system_prompt, short_term)
     elif provider == "openrouter":
@@ -1115,9 +1088,7 @@ def call_provider(msg, provider, model, system_prompt, short_term, device_id):
 
 
 def _call_groq(msg, model, system_prompt, short_term, retries=2):
-    # detect if this is a complex response needed
     is_complex = len(msg.split()) > 8
-
     for key in GROQ_KEYS:
         if not key:
             continue
@@ -1149,7 +1120,6 @@ def _call_groq(msg, model, system_prompt, short_term, retries=2):
             except Exception as e:
                 print(f"[Groq {model}] Error attempt {attempt}: {e}")
                 if attempt < retries - 1:
-                    import time
                     time.sleep(1)
     return None
 
@@ -1173,13 +1143,14 @@ def _call_openrouter(msg, model, system_prompt):
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": msg}
                     ],
-                    "max_tokens": 800
+                    "max_tokens": 1500
                 },
-                timeout=12
+                timeout=15
             )
             data = r.json()
             if "choices" in data:
                 return data["choices"][0]["message"]["content"]
+            print(f"[OpenRouter {model}] Failed: {data}")
         except Exception as e:
             print(f"[OpenRouter {model}] Error: {e}")
     return None
@@ -1196,11 +1167,13 @@ def _call_gemini(msg, system_prompt):
             json={
                 "contents": [{
                     "role": "user",
-                    "parts": [{"text": f"{system_prompt}\n\n{msg}"}]
+                    "parts": [{
+                        "text": f"{system_prompt}\n\n{msg}"
+                    }]
                 }],
-                "generationConfig": {"maxOutputTokens": 800}
+                "generationConfig": {"maxOutputTokens": 1500}
             },
-            timeout=12
+            timeout=15
         )
         data = r.json()
         candidates = data.get("candidates", [])
@@ -1224,15 +1197,42 @@ def _call_cohere(msg, system_prompt):
             json={
                 "message": msg,
                 "preamble": system_prompt,
-                "max_tokens": 800
+                "max_tokens": 1500
             },
-            timeout=12
+            timeout=15
         )
         data = r.json()
         return data.get("text", None)
     except Exception as e:
         print(f"[Cohere] Error: {e}")
     return None
+
+
+# ================= TTS =================
+def generate_tts_base64(text: str, voice: str = "onyx") -> str:
+    if not OPENAI_KEY:
+        return ""
+    try:
+        # clean text for TTS
+        clean = re.sub(r'\[ACTION:[^\]]*\]', '', text)
+        clean = re.sub(r'#{1,3}\s*', '', clean)
+        clean = re.sub(r'\*\*([^*]+)\*\*', r'\1', clean)
+        clean = clean.strip()[:600]
+
+        import openai
+        client = openai.OpenAI(api_key=OPENAI_KEY)
+        response = client.audio.speech.create(
+            model="tts-1",
+            voice=voice,
+            input=clean,
+            response_format="mp3",
+            speed=1.0
+        )
+        audio_bytes = response.content
+        return base64.b64encode(audio_bytes).decode("utf-8")
+    except Exception as e:
+        print(f"[TTS] Error: {e}")
+        return ""
 
 
 # ================= WEATHER AND NEWS =================
@@ -1314,14 +1314,15 @@ def process(msg: str, device_id: str):
             None
         )
 
-    # check pending confirmation first
+    # step 1: pending confirmation
     confirmation = check_user_confirmation(msg, device_id)
     if confirmation is not None:
         reply, action = confirmation
         update_short_term(msg, reply, device_id)
-        print(f"[Process] Confirmation handled. Action: {action}")
+        print(f"[Process] Confirmation: action={action}")
         return reply, action
 
+    # step 2: cache
     cache_key = f"{device_id}:{msg.lower()}"
     if cache_key in CACHE:
         cached = CACHE[cache_key]
@@ -1330,7 +1331,7 @@ def process(msg: str, device_id: str):
 
     personality = load_personality(device_id)
 
-    # intent understanding (natural language)
+    # step 3: intent detection
     intent = detect_user_intent(msg)
     if intent:
         print(f"[Process] Intent: {intent}")
@@ -1339,10 +1340,10 @@ def process(msg: str, device_id: str):
         )
         if reply:
             update_short_term(msg, reply, device_id)
-            print(f"[Process] Intent reply: '{reply}' action: '{action}'")
+            print(f"[Process] Intent reply: '{reply[:50]}' action: {action}")
             return reply, action
 
-    # exact command detection
+    # step 4: offline command
     offline_type = detect_offline_command(msg)
     if offline_type:
         action_trigger = build_action_trigger(offline_type, msg)
@@ -1355,13 +1356,17 @@ def process(msg: str, device_id: str):
         )
         if answer:
             clean_answer, extra_trigger = extract_action_trigger(answer)
+            # only convert LaTeX to unicode for non-math routes
+route_for_check = route_model(msg, personality) if 'route' not in dir() else route
+if route_for_check != "math":
+    clean_answer = latex_to_unicode(clean_answer)
             final_trigger = action_trigger or extra_trigger
             update_short_term(msg, clean_answer, device_id)
             return clean_answer, final_trigger
 
         return "On it.", action_trigger
 
-    # ai routing
+    # step 5: AI routing
     route = route_model(msg, personality)
     system_prompt = build_system_prompt(personality, route)
     short_term = get_short_term(device_id)
@@ -1382,6 +1387,10 @@ def process(msg: str, device_id: str):
             )
             if answer:
                 clean_answer, action_trigger = extract_action_trigger(answer)
+                # only convert LaTeX to unicode for non-math routes
+route_for_check = route_model(msg, personality) if 'route' not in dir() else route
+if route_for_check != "math":
+    clean_answer = latex_to_unicode(clean_answer)
                 update_short_term(msg, clean_answer, device_id)
                 return clean_answer, action_trigger
 
@@ -1395,6 +1404,10 @@ def process(msg: str, device_id: str):
             )
             if answer:
                 clean_answer, action_trigger = extract_action_trigger(answer)
+                # only convert LaTeX to unicode for non-math routes
+route_for_check = route_model(msg, personality) if 'route' not in dir() else route
+if route_for_check != "math":
+    clean_answer = latex_to_unicode(clean_answer)
                 update_short_term(msg, clean_answer, device_id)
                 return clean_answer, action_trigger
 
@@ -1424,6 +1437,7 @@ def process(msg: str, device_id: str):
         answer = "I could not process that right now. Please try again."
 
     clean_answer, action_trigger = extract_action_trigger(answer)
+    if route != "math":
     clean_answer = latex_to_unicode(clean_answer)
 
     CACHE[cache_key] = clean_answer
@@ -1454,7 +1468,6 @@ def run():
     nickname = data.get("nickname", user_name)
     device_id = data.get("device_id", "default")
 
-    # sanitize inputs
     msg = str(msg)[:2000].strip()
     device_id = str(device_id)[:100].strip()
     user_name = clean_name(str(user_name)[:100]) or "User"
@@ -1463,7 +1476,6 @@ def run():
     if not device_id:
         device_id = "default"
 
-    # rate limiting
     if is_rate_limited(device_id):
         return jsonify({
             "reply": "Too many requests. Please wait a moment."
@@ -1471,7 +1483,7 @@ def run():
 
     try:
         if action == "process":
-           # always sync the name before processing
+            # sync name on every request
             if nickname and nickname != "User":
                 personality = load_personality(device_id)
                 if personality.get("nickname", "User") != nickname:
@@ -1481,11 +1493,11 @@ def run():
 
             reply, action_trigger = process(msg, device_id)
             response = {"reply": reply or "Done"}
-            if action_trigger and action_trigger != "None":
+            if action_trigger and action_trigger not in ("None", "null"):
                 response["action_trigger"] = action_trigger
             print(
                 f"[Route] reply='{(reply or '')[:50]}' "
-                f"action_trigger='{action_trigger}'"
+                f"action='{action_trigger}'"
             )
             return jsonify(response)
 
@@ -1534,7 +1546,7 @@ def run():
         else:
             reply, action_trigger = process(msg, device_id)
             response = {"reply": reply or "Done"}
-            if action_trigger and action_trigger != "None":
+            if action_trigger and action_trigger not in ("None", "null"):
                 response["action_trigger"] = action_trigger
             return jsonify(response)
 
@@ -1543,6 +1555,26 @@ def run():
         import traceback
         traceback.print_exc()
         return jsonify({"reply": "Something went wrong. Please try again."})
+
+
+@app.route("/tts", methods=["POST"])
+def tts():
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
+    voice = data.get("voice", "onyx")
+    device_id = data.get("device_id", "default")
+
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+
+    if is_rate_limited(device_id):
+        return jsonify({"error": "Rate limited"}), 429
+
+    audio_b64 = generate_tts_base64(text, voice)
+    if not audio_b64:
+        return jsonify({"error": "TTS unavailable"}), 500
+
+    return jsonify({"audio": audio_b64, "format": "mp3"})
 
 
 @app.route("/health", methods=["GET"])
@@ -1557,6 +1589,7 @@ def health():
         "cohere": bool(COHERE_KEY),
         "weather": bool(WEATHER_KEY),
         "news": bool(NEWS_KEY),
+        "tts": bool(OPENAI_KEY),
     })
 
 
