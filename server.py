@@ -943,12 +943,12 @@ def get_mood_instruction(route: str) -> str:
         )
     if route == "math":
     return (
-        "Show working clearly. "
-        "Use LaTeX notation for all formulas. "
-        "Wrap display math in $$ ... $$ blocks. "
-        "Wrap inline math in $ ... $. "
-        "Use ## for section titles and numbered lists for steps. "
-        "Example: The derivative is $$\\frac{d}{dx}x^2 = 2x$$"
+           "Show working clearly. "
+           "Use LaTeX notation for all formulas. "
+           "Wrap display math in $$ ... $$ blocks. "
+           "Wrap inline math in $ ... $. "
+           "Use ## for section titles and numbered lists for steps. "
+           "Example: The derivative is $$\\frac{d}{dx}x^2 = 2x$$"
     )
     if route == "firm":
         return (
