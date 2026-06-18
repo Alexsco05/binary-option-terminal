@@ -942,7 +942,7 @@ def get_mood_instruction(route: str) -> str:
             "Use code blocks with backticks."
         )
     if route == "math":
-    return (
+        return (
            "Show working clearly. "
            "Use LaTeX notation for all formulas. "
            "Wrap display math in $$ ... $$ blocks. "
