@@ -1330,18 +1330,13 @@ def process(msg: str, device_id: str):
     msg = msg.strip()
     if not msg:
         return "No input received.", None
-
     if len(msg) > 2000:
         return "Message too long. Please keep it shorter.", None
-
     if not is_online():
-        return (
-            "I am offline right now. "
-            "Please check your internet connection.",
-            None
-        )
+        return ("I am offline right now. "
+                "Please check your internet connection."), None
 
-    # step 1: pending confirmation
+    # ── 1. PENDING CONFIRMATION ───────────────────────────────────
     confirmation = check_user_confirmation(msg, device_id)
     if confirmation is not None:
         reply, action = confirmation
@@ -1349,7 +1344,7 @@ def process(msg: str, device_id: str):
         print(f"[Process] Confirmation: action={action}")
         return reply, action
 
-    # step 2: cache
+    # ── 2. CACHE ──────────────────────────────────────────────────
     cache_key = f"{device_id}:{msg.lower()}"
     if cache_key in CACHE:
         cached = CACHE[cache_key]
@@ -1358,132 +1353,115 @@ def process(msg: str, device_id: str):
 
     personality = load_personality(device_id)
 
-    # step 3: intent detection
+    # ── 3. INTENT DETECTION ───────────────────────────────────────
     intent = detect_user_intent(msg)
     if intent:
         print(f"[Process] Intent: {intent}")
-        reply, action = build_intent_response(
-            intent, msg, personality, device_id
-        )
+        reply, action = build_intent_response(intent, msg,
+                                              personality, device_id)
         if reply:
             update_short_term(msg, reply, device_id)
-            print(f"[Process] Intent reply: '{reply[:50]}' action: {action}")
+            print(f"[Process] Intent reply: '{reply[:60]}' action={action}")
             return reply, action
 
-    # step 4: offline command
+    # ── 4. OFFLINE COMMAND ────────────────────────────────────────
     offline_type = detect_offline_command(msg)
     if offline_type:
         action_trigger = build_action_trigger(offline_type, msg)
-        print(f"[Process] Offline: {offline_type} -> {action_trigger}")
-
-        short_term = get_short_term(device_id)
+        print(f"[Process] Offline: {offline_type} → {action_trigger}")
+        short_term    = get_short_term(device_id)
         system_prompt = build_system_prompt(personality, "fast")
-        answer = _call_groq(
-            msg, "llama-3.1-8b-instant", system_prompt, short_term
-        )
+        answer = _call_groq(msg, "llama-3.1-8b-instant",
+                            system_prompt, short_term)
         if answer:
-            clean_answer, extra_trigger = extract_action_trigger(answer)
-            # only convert LaTeX to unicode for non-math routes
-     route_for_check = route_model(msg, personality) if 'route' not in dir() else route
-        if route_for_check != "math":
+            clean_answer, extra = extract_action_trigger(answer)
             clean_answer = latex_to_unicode(clean_answer)
-            final_trigger = action_trigger or extra_trigger
             update_short_term(msg, clean_answer, device_id)
-            return clean_answer, final_trigger
-
+            return clean_answer, action_trigger or extra
         return "On it.", action_trigger
 
-    # step 5: AI routing
-    route = route_model(msg, personality)
+    # ── 5. AI ROUTING ─────────────────────────────────────────────
+    route         = route_model(msg, personality)
     system_prompt = build_system_prompt(personality, route)
-    short_term = get_short_term(device_id)
-
+    short_term    = get_short_term(device_id)
     print(f"[Process] AI route: {route}")
 
+    # weather shortcut
     if route == "weather":
         city = ""
-        in_idx = msg.lower().find(" in ")
-        if in_idx > 0:
-            city = msg[in_idx + 4:].strip()
+        idx  = msg.lower().find(" in ")
+        if idx > 0:
+            city = msg[idx + 4:].strip()
         weather = get_weather(city)
         if weather:
             answer = _call_groq(
-                f"User asked: {msg}\nWeather: {weather}\n"
+                f"User asked: {msg}\nWeather data: {weather}\n"
                 f"Respond naturally.",
-                "llama-3.1-8b-instant", system_prompt, short_term
+                "llama-3.1-8b-instant", system_prompt, short_term,
             )
             if answer:
-                clean_answer, action_trigger = extract_action_trigger(answer)
-                # only convert LaTeX to unicode for non-math routes
-route_for_check = route_model(msg, personality) if 'route' not in dir() else route
-if route_for_check != "math":
-    clean_answer = latex_to_unicode(clean_answer)
-                update_short_term(msg, clean_answer, device_id)
-                return clean_answer, action_trigger
+                clean, trigger = extract_action_trigger(answer)
+                clean = latex_to_unicode(clean)
+                update_short_term(msg, clean, device_id)
+                return clean, trigger
 
+    # news shortcut
     if route == "news":
         news = get_news()
         if news:
             answer = _call_groq(
-                f"User asked: {msg}\nNews: {news}\n"
-                f"Summarize naturally.",
-                "llama-3.1-8b-instant", system_prompt, short_term
+                f"User asked: {msg}\nNews: {news}\nSummarise naturally.",
+                "llama-3.1-8b-instant", system_prompt, short_term,
             )
             if answer:
-                clean_answer, action_trigger = extract_action_trigger(answer)
-                # only convert LaTeX to unicode for non-math routes
-route_for_check = route_model(msg, personality) if 'route' not in dir() else route
-if route_for_check != "math":
-    clean_answer = latex_to_unicode(clean_answer)
-                update_short_term(msg, clean_answer, device_id)
-                return clean_answer, action_trigger
+                clean, trigger = extract_action_trigger(answer)
+                clean = latex_to_unicode(clean)
+                update_short_term(msg, clean, device_id)
+                return clean, trigger
 
-    model_config = MODELS.get(route, MODELS["fast"])
-    primary = model_config["primary"]
-    fallback = model_config["fallback"]
-
-    answer = call_provider(
-        msg, primary["provider"], primary["model"],
-        system_prompt, short_term, device_id
+    # primary → fallback
+    model_cfg = MODELS.get(route, MODELS["fast"])
+    answer    = call_provider(
+        msg,
+        model_cfg["primary"]["provider"],
+        model_cfg["primary"]["model"],
+        system_prompt, short_term, device_id,
     )
-
     if not answer:
-        print(f"[Process] Primary failed, trying fallback")
+        print("[Process] Primary failed, trying fallback")
         answer = call_provider(
-            msg, fallback["provider"], fallback["model"],
-            system_prompt, short_term, device_id
+            msg,
+            model_cfg["fallback"]["provider"],
+            model_cfg["fallback"]["model"],
+            system_prompt, short_term, device_id,
         )
-
+    # last-resort groq cascade
     if not answer:
-        for model in ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"]:
-            answer = _call_groq(msg, model, system_prompt, short_term)
+        for m in ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"]:
+            answer = _call_groq(msg, m, system_prompt, short_term)
             if answer:
                 break
 
     if not answer:
-        answer = "I could not process that right now. Please try again."
+        answer = ("I could not process that right now. "
+                  "Please try again.")
 
     clean_answer, action_trigger = extract_action_trigger(answer)
+
+    # skip latex conversion for math route (keep $$ blocks for WebView)
     if route != "math":
-    clean_answer = latex_to_unicode(clean_answer)
+        clean_answer = latex_to_unicode(clean_answer)
 
     CACHE[cache_key] = clean_answer
     update_short_term(msg, clean_answer, device_id)
 
-    threading.Thread(
-        target=update_long_term,
-        args=(msg, clean_answer, device_id),
-        daemon=True
-    ).start()
-
+    threading.Thread(target=update_long_term,
+                     args=(msg, clean_answer, device_id),
+                     daemon=True).start()
     extract_facts(msg, device_id)
 
-    print(
-        f"[Process] Reply: '{clean_answer[:60]}' "
-        f"action: '{action_trigger}'"
-    )
+    print(f"[Process] reply='{clean_answer[:60]}' action='{action_trigger}'")
     return clean_answer, action_trigger
-
 
 # ================= ROUTES =================
 @app.route("/run", methods=["POST"])
