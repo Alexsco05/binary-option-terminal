@@ -16,7 +16,7 @@ from collections import defaultdict
 
 app = Flask(__name__)
 
-# ================= CONFIG =================
+# ================= CONFIG & API KEYS =================
 BOT_NAME = "Gideon"
 
 GROQ_KEYS = [
@@ -29,6 +29,11 @@ GROQ_KEYS = [
 OPENROUTER_KEYS = [
     os.getenv("OPENROUTER_KEY_1", ""),
     os.getenv("OPENROUTER_KEY_2", ""),
+]
+
+MISTRAL_KEYS = [
+    os.getenv("MISTRAL_KEY_1", ""),
+    os.getenv("MISTRAL_KEY_2", ""),
 ]
 
 GEMINI_KEY = os.getenv("GEMINI_KEY", "")
@@ -75,10 +80,8 @@ MODELS = {
                      "model": "gemini-1.5-flash"}
     },
     "creative": {
-        "primary": {"provider": "groq",
-                    "model": "llama-3.3-70b-versatile"},
-        "fallback": {"provider": "openrouter",
-                     "model": "mistralai/mistral-7b-instruct:free"}
+        "primary":  {"provider": "groq",         "model": "llama-3.3-70b-versatile"},
+        "fallback": {"provider": "mistral",       "model": "mistral-small-latest"},
     },
     "empathetic": {
         "primary": {"provider": "groq",
@@ -943,12 +946,12 @@ def get_mood_instruction(route: str) -> str:
         )
     if route == "math":
         return (
-           "Show working clearly. "
-           "Use LaTeX notation for all formulas. "
-           "Wrap display math in $$ ... $$ blocks. "
-           "Wrap inline math in $ ... $. "
-           "Use ## for section titles and numbered lists for steps. "
-           "Example: The derivative is $$\\frac{d}{dx}x^2 = 2x$$"
+            "Show working clearly. "
+            "Use LaTeX notation for all formulas. "
+            "Wrap display math in $$ ... $$ blocks. "
+            "Wrap inline math in $ ... $. "
+            "Use ## for section titles and numbered lists for steps. "
+            "Example: The derivative is $$\\frac{d}{dx}x^2 = 2x$$"
     )
     if route == "firm":
         return (
@@ -1073,6 +1076,28 @@ def call_groq_raw(prompt: str):
             print(f"[Groq Raw] Error: {e}")
     return None
 
+def _call_mistral(msg: str, system_prompt: str):
+    for key in MISTRAL_KEYS:
+        if not key:
+            continue
+        try:
+            r = requests.post(
+                "https://api.mistral.ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json"},
+                json={"model": "mistral-small-latest",
+                      "messages": [{"role":"system","content":system_prompt},
+                                   {"role":"user","content":msg}],
+                      "max_tokens": 1500, "temperature": 0.7},
+                timeout=15,
+            )
+            data = r.json()
+            if "choices" in data:
+                return data["choices"][0]["message"]["content"]
+            print(f"[Mistral] failed: {data.get('error','')}")
+        except Exception as e:
+            print(f"[Mistral] {e}")
+    return None
 
 def call_provider(msg, provider, model, system_prompt,
                   short_term, device_id):
@@ -1084,6 +1109,8 @@ def call_provider(msg, provider, model, system_prompt,
         return _call_gemini(msg, system_prompt)
     elif provider == "cohere":
         return _call_cohere(msg, system_prompt)
+    elif provider == "mistral":
+        return _call_mistral(msg, system_prompt)
     return None
 
 
