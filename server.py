@@ -1357,9 +1357,9 @@ def process(msg: str, device_id: str):
         if answer:
             clean_answer, extra_trigger = extract_action_trigger(answer)
             # only convert LaTeX to unicode for non-math routes
-route_for_check = route_model(msg, personality) if 'route' not in dir() else route
-if route_for_check != "math":
-    clean_answer = latex_to_unicode(clean_answer)
+     route_for_check = route_model(msg, personality) if 'route' not in dir() else route
+        if route_for_check != "math":
+            clean_answer = latex_to_unicode(clean_answer)
             final_trigger = action_trigger or extra_trigger
             update_short_term(msg, clean_answer, device_id)
             return clean_answer, final_trigger
