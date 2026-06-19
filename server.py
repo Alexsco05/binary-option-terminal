@@ -964,8 +964,6 @@ def generate_tts_base64(text: str, voice: str = "onyx") -> str:
                 "speed":           1.0,
             },
             timeout=20,
-        print("[TTS] OpenAI status:", r.status_code)
-        print("[TTS] OpenAI response:", r.text[:200])
         )
         if r.status_code == 200:
             return base64.b64encode(r.content).decode("utf-8")
