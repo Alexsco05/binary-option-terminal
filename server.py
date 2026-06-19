@@ -34,7 +34,7 @@ GEMINI_KEY    = os.getenv("GEMINI_KEY", "")
 COHERE_KEY    = os.getenv("COHERE_KEY", "")
 WEATHER_KEY   = os.getenv("WEATHER_KEY", "")
 NEWS_KEY      = os.getenv("NEWS_KEY", "")
-OPENAI_KEY    = os.getenv("OPENAI_API_KEY", "")
+OPENAI_KEY    = os.getenv("OPENAI_KEY", "")
 
 # ================================================================
 # RATE LIMITING
