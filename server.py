@@ -964,6 +964,8 @@ def generate_tts_base64(text: str, voice: str = "onyx") -> str:
                 "speed":           1.0,
             },
             timeout=20,
+        print("[TTS] OpenAI status:", r.status_code)
+        print("[TTS] OpenAI response:", r.text[:200])
         )
         if r.status_code == 200:
             return base64.b64encode(r.content).decode("utf-8")
@@ -971,7 +973,7 @@ def generate_tts_base64(text: str, voice: str = "onyx") -> str:
             print(f"[TTS] HTTP {r.status_code}: {r.text[:200]}")
     except Exception as e:
         print(f"[TTS] error: {e}")
-    return ""
+    raise
 
 # ================================================================
 # WEATHER & NEWS
@@ -1254,6 +1256,7 @@ def tts():
     if is_rate_limited(device_id):
         return jsonify({"error": "Rate limited"}), 429
     audio = generate_tts_base64(text, voice)
+    print("[TTS ROUTE] audio length:", len(audio) if audio else 0)
     if not audio:
         return jsonify({"error": "TTS unavailable"}), 500
     return jsonify({"audio": audio, "format": "mp3"})
