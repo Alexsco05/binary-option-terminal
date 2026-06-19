@@ -941,21 +941,36 @@ def call_provider(msg: str, provider: str, model: str,
 # ================================================================
 def generate_tts_base64(text: str, voice: str = "onyx") -> str:
     if not OPENAI_KEY:
+        print("[TTS] No OPENAI_API_KEY set")
         return ""
     try:
-        import openai
-        clean  = re.sub(r'\[ACTION:[^\]]*\]', '', text)
-        clean  = re.sub(r'#{1,3}\s*', '', clean)
-        clean  = re.sub(r'\*\*([^*]+)\*\*', r'\1', clean)
-        clean  = clean.strip()[:600]
-        client = openai.OpenAI(api_key=OPENAI_KEY)
-        resp   = client.audio.speech.create(
-            model="tts-1", voice=voice, input=clean,
-            response_format="mp3", speed=1.0,
+        # clean text
+        clean = re.sub(r'\[ACTION:[^\]]*\]', '', text)
+        clean = re.sub(r'#{1,3}\s*', '', clean)
+        clean = re.sub(r'\*\*([^*]+)\*\*', r'\1', clean)
+        clean = clean.strip()[:600]
+
+        r = requests.post(
+            "https://api.openai.com/v1/audio/speech",
+            headers={
+                "Authorization": f"Bearer {OPENAI_KEY}",
+                "Content-Type":  "application/json",
+            },
+            json={
+                "model":           "tts-1",
+                "voice":           voice,
+                "input":           clean,
+                "response_format": "mp3",
+                "speed":           1.0,
+            },
+            timeout=20,
         )
-        return base64.b64encode(resp.content).decode("utf-8")
+        if r.status_code == 200:
+            return base64.b64encode(r.content).decode("utf-8")
+        else:
+            print(f"[TTS] HTTP {r.status_code}: {r.text[:200]}")
     except Exception as e:
-        print(f"[TTS] {e}")
+        print(f"[TTS] error: {e}")
     return ""
 
 # ================================================================
