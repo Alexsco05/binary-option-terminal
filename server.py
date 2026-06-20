@@ -1182,53 +1182,139 @@ def call_provider(msg, provider, model, system_prompt, short_term, device_id):
         return _call_mistral(msg, system_prompt, short_term)
     return None
 
+
 # ================================================================
-# OPENAI TTS — raw HTTP, validated voice, full error logging
+# TTS — Edge TTS primary (free, no quota/billing), OpenAI optional
+# fallback. Same /tts contract as before (base64 in JSON), so the
+# Android side needs zero changes.
 # ================================================================
-VALID_VOICES = {
+import asyncio
+import uuid as _uuid
+
+VALID_OPENAI_VOICES = {
     "alloy", "ash", "ballad", "coral", "echo",
     "fable", "onyx", "nova", "sage", "shimmer",
 }
 
-def generate_tts_base64(text: str, voice: str = "onyx") -> tuple:
-    """Returns (audio_base64, error_message). One will be empty."""
-    if not OPENAI_KEY:
-        print("[TTS] OPENAI_API_KEY is not set in Railway environment variables")
-        return "", "OPENAI_API_KEY not configured on server"
+# Edge TTS voice names — pick whichever sounds best for Gideon.
+# Full list: run `edge-tts --list-voices` once locally if you want options.
+EDGE_VOICE_MAP = {
+    "onyx":    "en-US-GuyNeural",      # closest match: calm male voice
+    "echo":    "en-US-ChristopherNeural",
+    "alloy":   "en-US-EricNeural",
+    "fable":   "en-GB-RyanNeural",
+    "nova":    "en-US-AriaNeural",     # female option
+    "shimmer": "en-US-JennyNeural",    # female option
+    "default": "en-US-GuyNeural",
+}
 
-    if voice not in VALID_VOICES:
-        print(f"[TTS] Invalid voice '{voice}', falling back to onyx")
+def _clean_for_speech(text: str) -> str:
+    """Strips markdown/action-tags so headers and bullets don't eat
+    into the speakable content, then truncates to a safe length."""
+    clean = re.sub(r'\[ACTION:[^\]]*\]', '', text)
+    clean = re.sub(r'#{1,3}\s*', '', clean)
+    clean = re.sub(r'\*\*([^*]+)\*\*', r'\1', clean)
+    clean = re.sub(r'^[-•]\s*', '', clean, flags=re.MULTILINE)
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    return clean[:900]
+
+def _generate_edge_tts(text: str, voice_key: str) -> tuple:
+    """Returns (audio_base64, error_message). Free, no API key, no quota.
+    Each call uses a unique temp file so concurrent requests from
+    different users never collide or overwrite each other."""
+    try:
+        import edge_tts
+    except ImportError:
+        return "", "edge-tts package not installed on server"
+
+    edge_voice = EDGE_VOICE_MAP.get(voice_key, EDGE_VOICE_MAP["default"])
+    temp_path  = f"/tmp/gideon_tts_{_uuid.uuid4().hex}.mp3"
+
+    try:
+        async def _run():
+            communicate = edge_tts.Communicate(text, edge_voice)
+            await communicate.save(temp_path)
+
+        # safe to call from a plain Flask request handler — creates
+        # its own event loop rather than assuming one already exists
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(_run())
+        finally:
+            loop.close()
+
+        with open(temp_path, "rb") as f:
+            audio_bytes = f.read()
+
+        if not audio_bytes:
+            return "", "Edge TTS produced an empty file"
+
+        return base64.b64encode(audio_bytes).decode("utf-8"), ""
+    except Exception as e:
+        print(f"[TTS][Edge] exception: {e}")
+        return "", f"Edge TTS error: {e}"
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+
+def _generate_openai_tts(text: str, voice: str) -> tuple:
+    """Returns (audio_base64, error_message). Used only as an optional
+    fallback if OPENAI_API_KEY is set and billing is active."""
+    if not OPENAI_KEY:
+        return "", "OPENAI_API_KEY not configured"
+
+    if voice not in VALID_OPENAI_VOICES:
         voice = "onyx"
 
     try:
-        # strip markdown structure before truncating so headers/bullets
-        # don't eat into the speakable content budget
-        clean = re.sub(r'\[ACTION:[^\]]*\]', '', text)
-        clean = re.sub(r'#{1,3}\s*', '', clean)
-        clean = re.sub(r'\*\*([^*]+)\*\*', r'\1', clean)
-        clean = re.sub(r'^[-•]\s*', '', clean, flags=re.MULTILINE)
-        clean = re.sub(r'\s+', ' ', clean).strip()
-        clean = clean[:900]  # raised from 600 now that headers are stripped first
-
         r = SESSION.post(
             "https://api.openai.com/v1/audio/speech",
             headers={"Authorization": f"Bearer {OPENAI_KEY}"},
             json={
-                "model": "tts-1", "voice": voice, "input": clean,
+                "model": "tts-1", "voice": voice, "input": text,
                 "response_format": "mp3", "speed": 1.0,
             },
             timeout=20,
         )
-        print(f"[TTS] OpenAI response status: {r.status_code}")
+        print(f"[TTS][OpenAI] response status: {r.status_code}")
         if r.status_code == 200:
             return base64.b64encode(r.content).decode("utf-8"), ""
         else:
             body_preview = r.text[:300]
-            print(f"[TTS] OpenAI error body: {body_preview}")
+            print(f"[TTS][OpenAI] error body: {body_preview}")
             return "", f"OpenAI TTS returned {r.status_code}: {body_preview}"
     except Exception as e:
-        print(f"[TTS] exception: {e}")
+        print(f"[TTS][OpenAI] exception: {e}")
         return "", str(e)
+
+def generate_tts_base64(text: str, voice: str = "onyx") -> tuple:
+    """
+    Returns (audio_base64, error_message). One will be empty.
+    Edge TTS is tried first since it has no billing/quota risk.
+    OpenAI is only used as a fallback if Edge TTS fails for some
+    reason and OPENAI_API_KEY happens to be configured and working —
+    giving you a working voice pipeline today regardless of OpenAI
+    account status, while still letting OpenAI act as a backup if
+    you fix billing later.
+    """
+    clean = _clean_for_speech(text)
+    if not clean:
+        return "", "No speakable content after cleaning"
+
+    audio, error = _generate_edge_tts(clean, voice)
+    if audio:
+        return audio, ""
+
+    print(f"[TTS] Edge TTS failed ({error}), trying OpenAI fallback")
+    audio, error2 = _generate_openai_tts(clean, voice)
+    if audio:
+        return audio, ""
+
+    return "", f"Both TTS providers failed. Edge: {error} | OpenAI: {error2}"
 
 # ================================================================
 # WEATHER & NEWS
