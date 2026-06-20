@@ -20,34 +20,35 @@ app = Flask(__name__)
 # CONFIG
 # ================================================================
 BOT_NAME = "Gideon"
-‎
-‎GROQ_KEYS = [
-‎    os.getenv("GROQ_KEY_1", ""),
-‎    os.getenv("GROQ_KEY_2", "")
-‎]
-‎
-‎OPENROUTER_KEYS = [
-‎    os.getenv("OPENROUTER_KEY_1", ""),
-‎    os.getenv("OPENROUTER_KEY_2", "")
-‎]
-‎
-‎GEMINI_KEYS = [
-‎    os.getenv("GEMINI_KEY_1", ""),
-‎    os.getenv("GEMINI_KEY_2", "")
-‎]
-‎
-‎MISTRAL_KEYS = [
-‎    os.getenv("MISTRAL_KEY_1", ""),
-‎    os.getenv("MISTRAL_KEY_2", "")
-‎]
-‎
-‎COHERE_KEYS = [
-‎    os.getenv("COHERE_KEY_1", ""),
-‎    os.getenv("COHERE_KEY_2", "")
-‎]
-WEATHER_KEY   = os.getenv("WEATHER_KEY", "")
-NEWS_KEY      = os.getenv("NEWS_KEY", "")
-OPENAI_KEY    = os.getenv("OPENAI_API_KEY", "")
+
+GROQ_KEYS = [
+    os.getenv("GROQ_KEY_1", ""),
+    os.getenv("GROQ_KEY_2", "")
+]
+
+OPENROUTER_KEYS = [
+    os.getenv("OPENROUTER_KEY_1", ""),
+    os.getenv("OPENROUTER_KEY_2", "")
+]
+
+GEMINI_KEYS = [
+    os.getenv("GEMINI_KEY_1", ""),
+    os.getenv("GEMINI_KEY_2", "")
+]
+
+MISTRAL_KEYS = [
+    os.getenv("MISTRAL_KEY_1", ""),
+    os.getenv("MISTRAL_KEY_2", "")
+]
+
+COHERE_KEYS = [
+    os.getenv("COHERE_KEY_1", ""),
+    os.getenv("COHERE_KEY_2", "")
+]
+
+WEATHER_KEY = os.getenv("WEATHER_KEY", "")
+NEWS_KEY = os.getenv("NEWS_KEY", "")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
 DEVICE_SECRET = os.getenv("DEVICE_SECRET", "gideon-dev-secret-change-in-railway")
 
 # ── shared HTTP session — reuses connections, cuts latency ────────
