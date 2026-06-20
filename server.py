@@ -19,22 +19,32 @@ app = Flask(__name__)
 # ================================================================
 # CONFIG
 # ================================================================
-BOT_NAME = "Gideon"
-
-GROQ_KEYS = [
-    os.getenv("GROQ_KEY_1", ""),
-    os.getenv("GROQ_KEY_2", ""),
-]
-OPENROUTER_KEYS = [
-    os.getenv("OPENROUTER_KEY_1", ""),
-    os.getenv("OPENROUTER_KEY_2", ""),
-]
-MISTRAL_KEYS = [
-    os.getenv("MISTRAL_KEY_1", ""),
-    os.getenv("MISTRAL_KEY_2", ""),
-]
-GEMINI_KEY    = os.getenv("GEMINI_KEY", "")
-COHERE_KEY    = os.getenv("COHERE_KEY", "")
+‎BOT_NAME = "Gideon"
+‎
+‎GROQ_KEYS = [
+‎    os.getenv("GROQ_KEY_1", ""),
+‎    os.getenv("GROQ_KEY_2", "")
+‎]
+‎
+‎OPENROUTER_KEYS = [
+‎    os.getenv("OPENROUTER_KEY_1", ""),
+‎    os.getenv("OPENROUTER_KEY_2", "")
+‎]
+‎
+‎GEMINI_KEYS = [
+‎    os.getenv("GEMINI_KEY_1", ""),
+‎    os.getenv("GEMINI_KEY_2", "")
+‎]
+‎
+‎MISTRAL_KEYS = [
+‎    os.getenv("MISTRAL_KEY_1", ""),
+‎    os.getenv("MISTRAL_KEY_2", "")
+‎]
+‎
+‎COHERE_KEYS = [
+‎    os.getenv("COHERE_KEY_1", ""),
+‎    os.getenv("COHERE_KEY_2", "")
+‎]
 WEATHER_KEY   = os.getenv("WEATHER_KEY", "")
 NEWS_KEY      = os.getenv("NEWS_KEY", "")
 OPENAI_KEY    = os.getenv("OPENAI_API_KEY", "")
@@ -1098,9 +1108,10 @@ def _call_openrouter(msg: str, model: str, system_prompt: str, short_term: list)
     return None
 
 def _call_gemini(msg: str, system_prompt: str, short_term: list):
-    if not GEMINI_KEY:
-        return None
-    try:
+    for key in GEMINI_KEYS:
+        if not key:
+            continue
+        try:
         # fold short_term into the context Gemini receives, since it has
         # no native multi-turn role array the same way OpenAI-style APIs do
         history_text = ""
@@ -1124,9 +1135,11 @@ def _call_gemini(msg: str, system_prompt: str, short_term: list):
     return None
 
 def _call_cohere(msg: str, system_prompt: str, short_term: list):
-    if not COHERE_KEY:
-        return None
-    try:
+    for key in COHERE_KEYS:
+        if not key:
+            continue
+        
+        try:
         chat_history = []
         for m in short_term[1:]:
             chat_history.append({
