@@ -708,42 +708,6 @@ def detect_user_intent(msg: str):
         for p in patterns:
             if p in ml:
                 return intent
-                               "reduce the volume", "lower volume"],
-    "intent_volume_up":       ["can't hear", "increase the sound", "make it louder",
-                               "sound is too low", "turn it up", "raise the volume"],
-    "intent_focus":           ["i need to focus", "help me focus",
-                               "i keep getting distracted",
-                               "stop me from wasting time",
-                               "i need to be productive",
-                               "help me stop procrastinating",
-                               "i'm wasting time", "put me in focus mode",
-                               "help me concentrate"],
-    "intent_task":            ["i need to remember to", "don't let me forget to",
-                               "add this to my list", "put this on my list",
-                               "note this down", "i need to do"],
-    "intent_lock":            ["lock up", "secure the phone", "i'm done with my phone",
-                               "lock it up", "secure it for me"],
-    "intent_sleep":           ["i'm going to sleep", "time for bed", "about to sleep",
-                               "heading to bed", "i'm sleepy",
-                               "turning in for the night", "i want to sleep",
-                               "i need to sleep", "help me sleep",
-                               "prepare for bed", "i need rest",
-                               "i'm going to rest", "let me sleep", "i'm tired"],
-    "intent_weather":         ["is it going to rain", "should i carry an umbrella",
-                               "what's the weather like", "how's the weather",
-                               "is it hot outside", "is it cold outside",
-                               "weather today", "weather outside"],
-    "intent_news":            ["what's going on in the world", "any news today",
-                               "current events", "what happened today",
-                               "what's in the news"],
-}
-
-def detect_user_intent(msg: str):
-    ml = msg.lower().strip()
-    for intent, patterns in INTENT_PATTERNS.items():
-        for p in patterns:
-            if p in ml:
-                return intent
     return None
 
 # ================================================================
