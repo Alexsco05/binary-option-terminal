@@ -38,6 +38,7 @@ COHERE_KEY    = os.getenv("COHERE_KEY", "")
 WEATHER_KEY   = os.getenv("WEATHER_KEY", "")
 NEWS_KEY      = os.getenv("NEWS_KEY", "")
 OPENAI_KEY    = os.getenv("OPENAI_API_KEY", "")
+BRAVE_SEARCH_KEY = os.getenv("BRAVE_SEARCH_KEY", "")
 DEVICE_SECRET = os.getenv("DEVICE_SECRET", "gideon-dev-secret-change-in-railway")
 
 # ── shared HTTP session — reuses connections, cuts latency ────────
@@ -253,6 +254,34 @@ def latex_to_unicode(text: str) -> str:
     text = re.sub(r'\\[a-zA-Z]+', '', text)
     return text
 
+def strip_stray_inline_dollars(text: str) -> str:
+    """
+    Removes single-$ wrapping around inline variables/symbols (e.g. '$a$'
+    becomes 'a') while leaving real $$ ... $$ display blocks untouched,
+    since those are still needed by the Android WebView/MathJax renderer.
+
+    Strategy: temporarily protect $$ blocks, strip remaining single $ pairs,
+    then restore the protected blocks.
+    """
+    placeholders = []
+
+    def _protect(match):
+        placeholders.append(match.group(0))
+        return f"\x00BLOCK{len(placeholders) - 1}\x00"
+
+    # protect $$ ... $$ blocks (and \[ ... \]) first
+    protected = re.sub(r'\$\$.*?\$\$', _protect, text, flags=re.DOTALL)
+    protected = re.sub(r'\\\[.*?\\\]', _protect, protected, flags=re.DOTALL)
+
+    # strip remaining single-$ ... $ wrappers — just unwrap the content
+    protected = re.sub(r'\$([^\$\n]{1,80}?)\$', r'\1', protected)
+
+    # restore protected display blocks
+    for i, block in enumerate(placeholders):
+        protected = protected.replace(f"\x00BLOCK{i}\x00", block)
+
+    return protected
+
 # ================================================================
 # HISTORY (via storage module — locked + atomic writes)
 # ================================================================
@@ -430,6 +459,61 @@ def extract_action_trigger(reply: str):
         clean  = re.sub(r'\[ACTION:[^\]]+\]', '', reply).strip()
         return clean, sanitize_action(action)
     return reply, None
+
+# ================================================================
+# WEB SEARCH — model-triggered, same pattern as [ACTION:...]
+# ----------------------------------------------------------------
+# The model can emit [SEARCH:query] when it judges a question needs
+# current information it wouldn't reliably know (news, prices, recent
+# events, "is X still true today" type questions). The server detects
+# this tag the same way it detects [ACTION:...], runs ONE search, and
+# feeds the results back to the model for a final answer. This keeps
+# search opt-in per-message rather than running on every request.
+# ================================================================
+def extract_search_trigger(reply: str):
+    m = re.search(r'\[SEARCH:([^\]]+)\]', reply)
+    if m:
+        query = m.group(1).strip()
+        clean = re.sub(r'\[SEARCH:[^\]]+\]', '', reply).strip()
+        return clean, query[:200]  # cap query length defensively
+    return reply, None
+
+def web_search(query: str) -> str:
+    """Returns a short plain-text summary of top results, or '' on failure."""
+    if not BRAVE_SEARCH_KEY:
+        print("[Search] BRAVE_SEARCH_KEY not configured")
+        return ""
+    try:
+        r = SESSION.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            headers={
+                "Accept": "application/json",
+                "X-Subscription-Token": BRAVE_SEARCH_KEY,
+            },
+            params={"q": query, "count": 5},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            print(f"[Search] Brave API returned {r.status_code}: {r.text[:200]}")
+            return ""
+
+        data = r.json()
+        results = data.get("web", {}).get("results", [])[:5]
+        if not results:
+            return ""
+
+        lines = []
+        for item in results:
+            title = item.get("title", "").strip()
+            desc  = item.get("description", "").strip()
+            desc  = re.sub(r'<[^>]+>', '', desc)  # strip any HTML tags
+            if title and desc:
+                lines.append(f"- {title}: {desc}")
+
+        return "\n".join(lines[:5])
+    except Exception as e:
+        print(f"[Search] exception: {e}")
+        return ""
 
 # ================================================================
 # OFFLINE COMMAND DETECTION — word-boundary aware to cut false positives
@@ -624,124 +708,44 @@ def detect_user_intent(msg: str):
         for p in patterns:
             if p in ml:
                 return intent
-    return None
+                               "reduce the volume", "lower volume"],
+    "intent_volume_up":       ["can't hear", "increase the sound", "make it louder",
+                               "sound is too low", "turn it up", "raise the volume"],
+    "intent_focus":           ["i need to focus", "help me focus",
+                               "i keep getting distracted",
+                               "stop me from wasting time",
+                               "i need to be productive",
+                               "help me stop procrastinating",
+                               "i'm wasting time", "put me in focus mode",
+                               "help me concentrate"],
+    "intent_task":            ["i need to remember to", "don't let me forget to",
+                               "add this to my list", "put this on my list",
+                               "note this down", "i need to do"],
+    "intent_lock":            ["lock up", "secure the phone", "i'm done with my phone",
+                               "lock it up", "secure it for me"],
+    "intent_sleep":           ["i'm going to sleep", "time for bed", "about to sleep",
+                               "heading to bed", "i'm sleepy",
+                               "turning in for the night", "i want to sleep",
+                               "i need to sleep", "help me sleep",
+                               "prepare for bed", "i need rest",
+                               "i'm going to rest", "let me sleep", "i'm tired"],
+    "intent_weather":         ["is it going to rain", "should i carry an umbrella",
+                               "what's the weather like", "how's the weather",
+                               "is it hot outside", "is it cold outside",
+                               "weather today", "weather outside"],
+    "intent_news":            ["what's going on in the world", "any news today",
+                               "current events", "what happened today",
+                               "what's in the news"],
+}
 
-# ================================================================
-# PENDING CONFIRMATIONS
-# ================================================================
-def store_pending(device_id: str, action: str, follow_up: str):
-    PENDING_CONFIRMATIONS[device_id] = {
-        "action": action, "follow_up": follow_up, "timestamp": time.time()
-    }
-
-def check_user_confirmation(msg: str, device_id: str):
-    pending = PENDING_CONFIRMATIONS.get(device_id)
-    if not pending:
-        return None
-    if time.time() - pending.get("timestamp", 0) > 120:
-        del PENDING_CONFIRMATIONS[device_id]
-        return None
+def detect_user_intent(msg: str):
     ml = msg.lower().strip()
-    pos = ["yes", "yeah", "yep", "sure", "ok", "okay", "go ahead", "please do",
-           "do it", "proceed", "definitely", "of course", "yes please", "yh",
-           "aye", "alright", "fine", "do that", "open it", "yes open",
-           "go on", "please"]
-    neg = ["no", "nope", "don't", "cancel", "stop", "never mind", "nah",
-           "not now", "skip it", "forget it", "no thanks", "don't do that",
-           "leave it"]
-    if any(ml == w or ml.startswith(w + " ") for w in pos):
-        action, fu = pending["action"], pending["follow_up"]
-        del PENDING_CONFIRMATIONS[device_id]
-        return fu, sanitize_action(action)
-    if any(ml == w or ml.startswith(w + " ") for w in neg):
-        del PENDING_CONFIRMATIONS[device_id]
-        return "No problem. Let me know if you need anything.", None
+    for intent, patterns in INTENT_PATTERNS.items():
+        for p in patterns:
+            if p in ml:
+                return intent
     return None
 
-# ================================================================
-# INTENT RESPONSE BUILDER
-# ================================================================
-def build_intent_response(intent: str, msg: str, personality: dict, device_id: str):
-    name = clean_name(personality.get("nickname") or personality.get("name", ""))
-    n    = f"{name}, " if name else ""
-    ml   = msg.lower()
-
-    simple = {
-        "intent_brightness_down": (f"{n}adjusting screen brightness now.", "min brightness"),
-        "intent_brightness_up":   (f"{n}increasing brightness now.", "max brightness"),
-        "intent_volume_down":     (f"{n}lowering the volume.", "min volume"),
-        "intent_volume_up":       (f"{n}turning up the volume.", "max volume"),
-        "intent_battery":         (f"{n}checking your battery.", "battery level"),
-        "intent_lock":            (f"{n}locking your phone now.", "lock my phone"),
-        "intent_screenshot":      (f"{n}taking a screenshot.", "take screenshot"),
-        "intent_weather":         (f"{n}checking the weather.", "weather"),
-        "intent_news":            (f"{n}getting the latest news.", "latest news"),
-    }
-    if intent in simple:
-        reply, action = simple[intent]
-        return reply, sanitize_action(action)
-
-    if intent == "intent_sleep":
-        store_pending(device_id, "sleep mode",
-                      f"Sleep mode set. Goodnight{', ' + name if name else ''}.")
-        return (f"Should I set up sleep mode{', ' + name if name else ''}? "
-                f"I will dim the screen, lower volume and turn on do not disturb."), None
-
-    if intent == "intent_focus":
-        store_pending(device_id, "focus mode", "Focus mode is active. Distractions limited.")
-        return f"{n}should I activate focus mode to help you concentrate?", None
-
-    if intent == "intent_whatsapp":
-        store_pending(device_id, "open whatsapp",
-                      "WhatsApp is open. Go ahead and send your message.")
-        return f"{n}should I open WhatsApp for you?", None
-
-    if intent == "intent_call":
-        for skip in ["i need to call", "i want to call", "make a call to",
-                     "ring", "phone"]:
-            if skip in ml:
-                contact = ml.replace(skip, "").strip()
-                if contact and len(contact) > 1:
-                    store_pending(device_id, f"call {contact}", f"Calling {contact}.")
-                    return f"{n}should I call {contact} for you?", None
-        return f"{n}who would you like me to call?", None
-
-    if intent == "intent_open_app":
-        for skip in ["i want to use", "i need to use", "can you open",
-                     "take me to", "bring up", "i need to go to",
-                     "i want to go to"]:
-            if skip in ml:
-                app_name = ml.replace(skip, "").strip()
-                app_name = app_name.replace(" the ", " ").replace(" app", "").strip()
-                if app_name and len(app_name) > 1:
-                    store_pending(device_id, f"open {app_name}", f"Opening {app_name}.")
-                    return f"{n}should I open {app_name} for you?", None
-        return f"{n}which app should I open?", None
-
-    if intent == "intent_music":
-        store_pending(device_id, "open spotify", "Opening your music.")
-        return f"{n}should I open your music app?", None
-
-    if intent == "intent_alarm":
-        m = re.search(r'(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', ml)
-        if m:
-            t = m.group(1).strip()
-            store_pending(device_id, f"set alarm for {t}", f"Alarm set for {t}.")
-            return f"{n}should I set an alarm for {t}?", None
-        return f"{n}what time should I set the alarm for?", None
-
-    if intent == "intent_task":
-        for skip in ["i need to remember to", "don't let me forget to",
-                     "add this to my list", "put this on my list",
-                     "note this down", "i need to do"]:
-            if skip in ml:
-                task = ml.replace(skip, "").strip()
-                if task and len(task) > 2:
-                    store_pending(device_id, f"add task {task}", f"Task added: {task}.")
-                    return f"{n}should I add '{task}' to your tasks?", None
-        return f"{n}what task should I add?", None
-
-    return None, None
 # ================================================================
 # PENDING CONFIRMATIONS
 # ================================================================
@@ -917,7 +921,6 @@ def route_model(msg: str, personality: dict) -> str:
           "translate", "essay", "story", "philosophy", "meaning of",
           "history of"], "complex", False),
     ]
-
     # special case: "code" as a standalone word with explain framing
     # (e.g. "explain Morse code") should not hit coding route
     if "code" in ml.split() and explain_framing and "morse" in ml:
@@ -958,7 +961,17 @@ def get_mood_behavior(mood: str) -> str:
 def get_route_depth_instruction(route: str) -> str:
     depth = {
         "complex": "This needs a thorough answer. Use full structure: headings, lists, bold key terms.",
-        "math":    "Show full working. Use LaTeX in $$ blocks for formulas. Number each step.",
+        "math":    (
+            "Show full working. Number each step. "
+            "Explain in plain spoken English, the way a teacher talks out loud, "
+            "not the way a textbook prints symbols. "
+            "Only use $$ ... $$ blocks for a full displayed equation on its own line. "
+            "Never wrap a single variable or symbol in dollar signs inside a "
+            "sentence (do not write $a$, $b$, $x$). In sentences, just write the "
+            "letter or word plainly: say 'a is the coefficient', not '$a$ is the "
+            "coefficient'. Read $\\pm$ inside a $$ block as part of the formula, "
+            "but in your explanation sentences say 'plus or minus' in words."
+        ),
         "coding":  "Be precise. Use code blocks. Skip unnecessary explanation around the code.",
         "fast":    "Keep it brief. One to three sentences unless more is clearly needed.",
         "firm":    "Be brief. State the boundary once. Do not over-explain.",
@@ -1001,6 +1014,19 @@ def build_system_prompt(personality: dict, route: str = "fast") -> str:
         f"Do not infer an action from general conversation. "
         f"If a requested action is not something you can do, say so "
         f"plainly without generating an action tag.\n\n"
+
+        f"WEB SEARCH:\n"
+        f"You can search the internet when a question needs current "
+        f"information you would not reliably know — recent news, today's "
+        f"prices or scores, something that may have changed recently, or "
+        f"anything where being out of date would give a wrong answer. "
+        f"To search, end your reply with [SEARCH:your search query] and "
+        f"nothing else after it — you will be given results and asked to "
+        f"answer again with them. Do not search for things you already "
+        f"know confidently (general knowledge, how-to questions, math, "
+        f"definitions, anything timeless). Do not search just because a "
+        f"question sounds current if you already know the answer. Only "
+        f"one search per message.\n\n"
 
         f"FORMATTING:\n"
         f"Use ## for headings and ### for subheadings only in longer "
@@ -1074,6 +1100,7 @@ def _call_groq(msg: str, model: str, system_prompt: str, short_term: list, retri
                 if attempt < retries - 1:
                     time.sleep(0.5)
     return None
+
 def _call_openrouter(msg: str, model: str, system_prompt: str, short_term: list):
     for key in OPENROUTER_KEYS:
         if not key:
@@ -1181,8 +1208,6 @@ def call_provider(msg, provider, model, system_prompt, short_term, device_id):
     if provider == "mistral":
         return _call_mistral(msg, system_prompt, short_term)
     return None
-
-
 # ================================================================
 # TTS — Edge TTS primary (free, no quota/billing), OpenAI optional
 # fallback. Same /tts contract as before (base64 in JSON), so the
@@ -1208,10 +1233,151 @@ EDGE_VOICE_MAP = {
     "default": "en-US-GuyNeural",
 }
 
+# ================================================================
+# MATH-TO-SPEECH CONVERSION
+# ----------------------------------------------------------------
+# Display text and spoken text are different jobs. A formula like
+# $$x = \frac{-b \pm \sqrt{b^2-4ac}}{2a}$$ should SHOW as symbols in
+# the WebView, but should be SPOKEN as a full sentence — "x equals
+# negative b, plus or minus the square root of b squared minus 4ac,
+# all over 2a" — the way a teacher actually says it out loud. This
+# converts LaTeX/math notation into natural spoken phrasing rather
+# than reading punctuation marks literally.
+# ================================================================
+SPEECH_MATH_MAP = [
+    # \frac{}{} and \sqrt{} are handled separately by _expand_nested_commands
+    # (brace-aware, handles nesting) — not listed here since simple regex
+    # patterns can't correctly match nested braces like \frac{-b}{\sqrt{x}}.
+    (r'\\int', ' the integral of '),
+    (r'\\sum', ' the sum of '),
+    (r'\\lim', ' the limit of '),
+    (r'\\infty', ' infinity '),
+    (r'\\theta', ' theta '), (r'\\alpha', ' alpha '), (r'\\beta', ' beta '),
+    (r'\\gamma', ' gamma '), (r'\\pi', ' pi '), (r'\\Delta', ' delta '),
+    (r'\\delta', ' delta '), (r'\\epsilon', ' epsilon '),
+    (r'\\lambda', ' lambda '), (r'\\mu', ' mu '), (r'\\sigma', ' sigma '),
+    (r'\\omega', ' omega '),
+    (r'\\times', ' times '), (r'\\div', ' divided by '),
+    (r'\\cdot', ' times '),
+    (r'\\neq', ' is not equal to '), (r'\\leq', ' is less than or equal to '),
+    (r'\\geq', ' is greater than or equal to '),
+    (r'\\approx', ' is approximately '),
+    (r'\\rightarrow', ' leads to '), (r'\\to', ' leads to '),
+    (r'\\Rightarrow', ' implies '),
+    (r'\\pm', ' plus or minus '),
+    (r'\\nabla', ' the gradient of '), (r'\\partial', ' the partial derivative of '),
+    (r'\^\{2\}', ' squared'), (r'\^2', ' squared'),
+    (r'\^\{3\}', ' cubed'), (r'\^3', ' cubed'),
+    (r'\^\{n\}', ' to the power of n'),
+    (r'_\{0\}', ' sub zero'), (r'_\{1\}', ' sub one'), (r'_\{2\}', ' sub two'),
+    (r'_\{n\}', ' sub n'),
+    (r'\\left\(', '('), (r'\\right\)', ')'),
+    (r'\\ldots', ' and so on '),
+    (r'(?<=[\d\)])\s*-\s*(?=[\d\(])', ' minus '),   # X-Y between numbers/parens, e.g. "4-4ac", "5 - 4(1)(6)"
+    (r'(?<=[a-zA-Z])\s*-\s*(?=\d)', ' minus '),     # e.g. "squared-4ac" after ^2 already converted
+    (r'(?<!\w)-(?=[a-zA-Z])', ' negative '),        # negative sign before a variable, e.g. "-b"
+    (r'(?<!\w)-(?=\d)', ' negative '),              # negative sign before a digit, e.g. "-5"
+    (r'=', ' equals '),
+    (r'\+', ' plus '),
+]
+
+def _find_matching_brace(s: str, start: int) -> int:
+    """Given s[start] == '{', returns the index of its matching '}'."""
+    depth = 0
+    for i in range(start, len(s)):
+        if s[i] == '{':
+            depth += 1
+        elif s[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+def _expand_nested_commands(text: str) -> str:
+    """
+    Handles \\frac{a}{b} and \\sqrt{x} with proper brace matching so
+    nested commands like \\frac{-b}{\\sqrt{x}} convert correctly instead
+    of the naive regex failing on the inner braces.
+    Runs repeatedly until no more matches are found (handles nesting).
+    """
+    changed = True
+    while changed:
+        changed = False
+
+        # \frac{...}{...}
+        idx = text.find('\\frac{')
+        if idx != -1:
+            brace1_start = idx + len('\\frac')
+            brace1_end = _find_matching_brace(text, brace1_start)
+            if brace1_end != -1 and brace1_end + 1 < len(text) and text[brace1_end + 1] == '{':
+                brace2_start = brace1_end + 1
+                brace2_end = _find_matching_brace(text, brace2_start)
+                if brace2_end != -1:
+                    numerator = text[brace1_start + 1:brace1_end]
+                    denominator = text[brace2_start + 1:brace2_end]
+                    replacement = f" {numerator.strip()} over {denominator.strip()} "
+                    text = text[:idx] + replacement + text[brace2_end + 1:]
+                    changed = True
+                    continue
+
+        # \sqrt{...}
+        idx = text.find('\\sqrt{')
+        if idx != -1:
+            brace_start = idx + len('\\sqrt')
+            brace_end = _find_matching_brace(text, brace_start)
+            if brace_end != -1:
+                inner = text[brace_start + 1:brace_end]
+                replacement = f" the square root of {inner.strip()} "
+                text = text[:idx] + replacement + text[brace_end + 1:]
+                changed = True
+                continue
+
+    return text
+
+def _convert_math_block_to_speech(math_text: str) -> str:
+    """Converts the inner content of a $$ ... $$ block into a spoken
+    sentence fragment."""
+    t = _expand_nested_commands(math_text)
+    for pattern, replacement in SPEECH_MATH_MAP:
+        t = re.sub(pattern, replacement, t)
+    # clean leftover backslash commands and braces that weren't matched
+    t = re.sub(r'\\[a-zA-Z]+', '', t)
+    t = t.replace('{', '').replace('}', '')
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+def convert_math_for_speech(text: str) -> str:
+    """
+    Full pipeline: finds $$ ... $$ display blocks and \\[ ... \\] blocks
+    and replaces them with spoken phrasing. Then unwraps any remaining
+    inline $...$ wrapping. Then runs the existing symbol-level cleanup
+    for anything left over (e.g. stray \\pm outside a block).
+    """
+    def _replace_display_block(match):
+        inner = match.group(1)
+        return " " + _convert_math_block_to_speech(inner) + " "
+
+    converted = re.sub(r'\$\$(.*?)\$\$', _replace_display_block, text, flags=re.DOTALL)
+    converted = re.sub(r'\\\[(.*?)\\\]', _replace_display_block, converted, flags=re.DOTALL)
+
+    # unwrap any remaining inline $...$ (single variables/symbols in prose)
+    converted = re.sub(r'\$([^\$\n]{1,80}?)\$', r'\1', converted)
+
+    # run symbol-level cleanup for anything outside a block (stray \pm,
+    # \frac, \sqrt etc that weren't inside $$ ... $$)
+    converted = _expand_nested_commands(converted)
+    for pattern, replacement in SPEECH_MATH_MAP:
+        converted = re.sub(pattern, replacement, converted)
+    converted = re.sub(r'\\[a-zA-Z]+', '', converted)
+
+    converted = re.sub(r'\s+', ' ', converted).strip()
+    return converted
+
 def _clean_for_speech(text: str) -> str:
-    """Strips markdown/action-tags so headers and bullets don't eat
-    into the speakable content, then truncates to a safe length."""
+    """Strips markdown/action-tags and converts math notation into
+    natural spoken phrasing, then truncates to a safe length."""
     clean = re.sub(r'\[ACTION:[^\]]*\]', '', text)
+    clean = convert_math_for_speech(clean)
     clean = re.sub(r'#{1,3}\s*', '', clean)
     clean = re.sub(r'\*\*([^*]+)\*\*', r'\1', clean)
     clean = re.sub(r'^[-•]\s*', '', clean, flags=re.MULTILINE)
@@ -1486,9 +1652,48 @@ def process(msg: str, device_id: str):
     if not answer:
         return "I could not process that right now. Please try again.", None
 
+    # ── WEB SEARCH (model-triggered) ────────────────────────────────
+    # If the model asked to search, run ONE search and ask it again
+    # with results included, the same two-step pattern already used
+    # for weather/news above. Capped at one round trip — if the model
+    # asks to search again after seeing results, we just use what we
+    # have rather than looping.
+    pre_search_clean, search_query = extract_search_trigger(answer)
+    if search_query:
+        print(f"[Search] Model requested search: '{search_query}'")
+        results = web_search(search_query)
+        if results:
+            followup_prompt = (
+                f"User asked: {msg}\n\n"
+                f"You searched for: {search_query}\n"
+                f"Search results:\n{results}\n\n"
+                f"Now answer the user's question naturally using these "
+                f"results. Do not mention that you searched or show raw "
+                f"results — just answer as yourself."
+            )
+            followup = call_provider(
+                followup_prompt, model_cfg["primary"]["provider"],
+                model_cfg["primary"]["model"], system_prompt, short_term, device_id
+            )
+            if followup:
+                answer = followup
+            else:
+                # search worked but the follow-up call failed —
+                # fall back to the pre-search reply with the tag stripped
+                answer = pre_search_clean or "I searched but could not put together an answer. Please try again."
+        else:
+            print("[Search] No results or search unavailable, using original reply")
+            answer = pre_search_clean or answer
+
     clean, action_trigger = extract_action_trigger(answer)
     if route != "math":
         clean = latex_to_unicode(clean)
+    else:
+        # math route keeps real $$ blocks for the WebView/MathJax renderer,
+        # but stray inline $a$ $b$ style wrapping (which isn't real LaTeX
+        # the renderer needs, just the model echoing notation in prose)
+        # gets unwrapped to plain text so it reads naturally in chat.
+        clean = strip_stray_inline_dollars(clean)
 
     # only cache informational replies — never cache anything carrying
     # an action_trigger (see Bug #1 fix note above)
@@ -1634,6 +1839,7 @@ def health_internal():
         "gemini": bool(GEMINI_KEY), "cohere": bool(COHERE_KEY),
         "weather": bool(WEATHER_KEY), "news": bool(NEWS_KEY),
         "tts": bool(OPENAI_KEY),
+        "brave_search": bool(BRAVE_SEARCH_KEY),
         "cache_size": len(CACHE),
         "active_device_count": len(USER_SHORT_TERM),
     })
