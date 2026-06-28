@@ -4,7 +4,7 @@
 # Pre-launch hardened build - July 1, 2026
 # ================================================================
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 import os, re, time, base64, hmac, hashlib, json, datetime
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
@@ -105,8 +105,12 @@ def is_rate_limited(device_id: str) -> bool:
 # MODEL REGISTRY
 # ================================================================
 MODELS = {
+    # llama-3.3-70b-versatile is the primary workhorse — higher free tier
+    # TPM limit than openai/gpt-oss-20b (which caps at 8k TPM and also
+    # interprets [SEARCH:...] tags as native tool calls, breaking the
+    # tag-based search system). 70b handles all route types well.
     "fast": {
-        "primary":  {"provider": "groq",       "model": "openai/gpt-oss-20b"},
+        "primary":  {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
         "fallback": {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
     },
     "complex": {
@@ -122,7 +126,7 @@ MODELS = {
         "fallback": {"provider": "cohere",     "model": "command-r"},
     },
     "firm": {
-        "primary":  {"provider": "groq",       "model": "openai/gpt-oss-20b"},
+        "primary":  {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
         "fallback": {"provider": "openrouter", "model": "mistralai/mistral-7b-instruct:free"},
     },
     "math": {
@@ -134,11 +138,11 @@ MODELS = {
         "fallback": {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
     },
     "weather": {
-        "primary":  {"provider": "groq",       "model": "openai/gpt-oss-20b"},
+        "primary":  {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
         "fallback": {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
     },
     "news": {
-        "primary":  {"provider": "groq",       "model": "openai/gpt-oss-20b"},
+        "primary":  {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
         "fallback": {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
     },
 }
@@ -680,7 +684,6 @@ def build_action_trigger(offline_type: str, msg: str) -> str:
     }
     return action_map.get(offline_type, ml)
 
-
 # ================================================================
 # INTENT PATTERNS
 # ================================================================
@@ -1196,7 +1199,7 @@ def _call_groq_raw(prompt: str):
             r = SESSION.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
-                json={"model": "openai/gpt-oss-20b",
+                json={"model": "llama-3.3-70b-versatile",
                       "messages": [{"role": "user", "content": prompt}],
                       "max_tokens": 500},
                 timeout=8,
@@ -1241,6 +1244,118 @@ def _call_groq(msg: str, model: str, system_prompt: str, short_term: list, retri
                 if attempt < retries - 1:
                     time.sleep(0.5)
     return None
+
+
+# ================================================================
+# PHASE 1 — STREAMING GROQ
+# ----------------------------------------------------------------
+# Calls Groq with stream=True and yields sentence chunks as they
+# arrive. Android starts TTS on the first sentence while the rest
+# is still being generated — this is what makes replies feel instant.
+# ================================================================
+def _stream_groq(msg: str, model: str, system_prompt: str,
+                 short_term: list, device_id: str):
+    """
+    Generator yielding SSE-formatted sentence chunks.
+    Format  : data: <sentence>\n\n
+    Done    : data: [DONE]\n\n
+    Action  : data: [ACTION:<cmd>]\n\n
+    Error   : data: [ERROR]<message>\n\n
+    """
+    is_complex = len(msg.split()) > 8
+    messages   = list(short_term)
+    messages[0] = {"role": "system", "content": system_prompt}
+    messages.append({"role": "user", "content": msg})
+
+    for key in GROQ_KEYS:
+        if not key:
+            continue
+        try:
+            r = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model":      model,
+                    "messages":   messages,
+                    "max_tokens": 1500 if is_complex else 800,
+                    "stream":     True,
+                },
+                stream=True,
+                timeout=30,
+            )
+            if r.status_code != 200:
+                print(f"[Stream] Groq {model} HTTP {r.status_code}")
+                continue
+
+            buffer     = ""
+            full_text  = ""
+            SENT_CHARS = {".", "!", "?"}
+
+            for raw_line in r.iter_lines():
+                if not raw_line:
+                    continue
+                line = raw_line.decode("utf-8", errors="ignore")
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload.strip() == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                    token = chunk["choices"][0].get("delta", {}).get("content", "")
+                    if not token:
+                        continue
+                    buffer    += token
+                    full_text += token
+
+                    # yield at sentence boundary or when buffer is large enough
+                    if any(c in buffer for c in SENT_CHARS) or len(buffer) > 180:
+                        split_at = max(
+                            buffer.rfind(". "),
+                            buffer.rfind("! "),
+                            buffer.rfind("? "),
+                            buffer.rfind(".\n"),
+                        )
+                        if split_at > 0:
+                            sentence = buffer[:split_at + 1].strip()
+                            buffer   = buffer[split_at + 1:].strip()
+                        elif len(buffer) > 250:
+                            sentence = buffer.strip()
+                            buffer   = ""
+                        else:
+                            continue
+                        if sentence:
+                            yield f"data: {sentence}\n\n"
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+
+            # yield remaining buffer
+            if buffer.strip():
+                yield f"data: {buffer.strip()}\n\n"
+
+            # send action trigger if present
+            _, action_trigger = extract_action_trigger(full_text)
+            if action_trigger and action_trigger not in ("None", "null"):
+                yield f"data: [ACTION:{action_trigger}]\n\n"
+
+            # update memory
+            short_term.append({"role": "user",     "content": msg})
+            short_term.append({"role": "assistant", "content": full_text})
+            trim_short_term(short_term)
+            EXECUTOR.submit(update_long_term, msg, full_text, device_id)
+            extract_facts(msg, device_id)
+
+            yield "data: [DONE]\n\n"
+            return
+
+        except requests.Timeout:
+            print(f"[Stream] Groq timeout on {model}")
+        except Exception as e:
+            print(f"[Stream] Groq {model} error: {e}")
+
+    yield "data: [ERROR]I could not get a response. Please try again.\n\n"
+    yield "data: [DONE]\n\n"
+
 
 def _call_openrouter(msg: str, model: str, system_prompt: str, short_term: list):
     for key in OPENROUTER_KEYS:
@@ -1624,6 +1739,7 @@ def generate_tts_base64(text: str, voice: str = "onyx") -> tuple:
 
     return "", f"Both TTS providers failed. Edge: {error} | OpenAI: {error2}"
 
+
 # ================================================================
 # WEATHER & NEWS
 # ================================================================
@@ -1733,7 +1849,7 @@ def process(msg: str, device_id: str):
         action_trigger = sanitize_action(build_action_trigger(offline_type, msg))
         short_term    = get_short_term(device_id)
         system_prompt = build_system_prompt(personality, "fast")
-        answer = _call_groq(msg, "openai/gpt-oss-20b", system_prompt, short_term)
+        answer = _call_groq(msg, "llama-3.3-70b-versatile", system_prompt, short_term)
         if answer:
             clean, extra = extract_action_trigger(answer)
             clean = latex_to_unicode(clean)
@@ -1754,7 +1870,7 @@ def process(msg: str, device_id: str):
         weather = get_weather(city)
         if weather:
             ans = _call_groq(f"User: {msg}\nWeather: {weather}\nRespond naturally.",
-                             "openai/gpt-oss-20b", system_prompt, short_term)
+                             "llama-3.3-70b-versatile", system_prompt, short_term)
             if ans:
                 clean, trigger = extract_action_trigger(ans)
                 clean = latex_to_unicode(clean)
@@ -1767,7 +1883,7 @@ def process(msg: str, device_id: str):
         news = get_news()
         if news:
             ans = _call_groq(f"User: {msg}\nNews: {news}\nSummarise naturally.",
-                             "openai/gpt-oss-20b", system_prompt, short_term)
+                             "llama-3.3-70b-versatile", system_prompt, short_term)
             if ans:
                 clean, trigger = extract_action_trigger(ans)
                 clean = latex_to_unicode(clean)
@@ -1786,7 +1902,7 @@ def process(msg: str, device_id: str):
                                model_cfg["fallback"]["model"],
                                system_prompt, short_term, device_id)
     if not answer:
-        for m in ["openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-70b-versatile"]:
+        for m in ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "mixtral-8x7b-32768"]:
             answer = _call_groq(msg, m, system_prompt, short_term)
             if answer:
                 break
@@ -1825,7 +1941,14 @@ def process(msg: str, device_id: str):
                 answer = pre_search_clean or "I searched but could not put together an answer. Please try again."
         else:
             print("[Search] No results or search unavailable, using original reply")
-            answer = pre_search_clean or answer
+            # FIXED: always use pre_search_clean so the [SEARCH:...] tag
+            # never reaches the user's chat bubble. When the model returns
+            # ONLY the tag with no preceding text, pre_search_clean is empty
+            # — use a fallback message instead of showing the raw tag.
+            if pre_search_clean.strip():
+                answer = pre_search_clean
+            else:
+                answer = "I don't have live search access right now. Let me answer from what I know."
 
     clean, action_trigger = extract_action_trigger(answer)
     if route != "math":
@@ -1937,6 +2060,98 @@ def run():
         traceback.print_exc()
         return jsonify({"reply": "Something went wrong. Please try again."})
 
+
+
+
+# ================================================================
+# PHASE 1 — /stream SSE ENDPOINT
+# ----------------------------------------------------------------
+# Android connects here instead of /run for voice sessions.
+# Sentences arrive progressively — TTS starts on sentence 1 while
+# sentences 2, 3... are still being generated. Perceived latency
+# drops from "wait for full reply" to "first sentence time" only.
+# ================================================================
+@app.route("/stream", methods=["POST"])
+def stream_response():
+    data      = request.get_json(silent=True) or {}
+    msg       = str(data.get("data", "") or data.get("message", ""))[:2000].strip()
+    user_name = clean_name(str(data.get("user_name", "User"))[:100]) or "User"
+    nickname  = clean_name(str(data.get("nickname",  user_name))[:100]) or user_name
+    device_id = safe_device_id(str(data.get("device_id", "default"))[:100].strip() or "default")
+
+    if not msg:
+        def empty():
+            yield "data: [ERROR]Empty message.\n\n"
+            yield "data: [DONE]\n\n"
+        return Response(stream_with_context(empty()),
+                        mimetype="text/event-stream")
+
+    if is_rate_limited(device_id):
+        def limited():
+            yield "data: [ERROR]Too many requests. Please wait.\n\n"
+            yield "data: [DONE]\n\n"
+        return Response(stream_with_context(limited()),
+                        mimetype="text/event-stream")
+
+    # update name if provided
+    if nickname and nickname != "User":
+        p = load_personality(device_id)
+        if p.get("nickname", "User") != nickname:
+            p["nickname"] = nickname
+            p["name"]     = nickname
+            save_personality(p, device_id)
+
+    personality  = load_personality(device_id)
+    short_term   = USER_SHORT_TERM.setdefault(
+        device_id, [{"role": "system", "content": ""}]
+    )
+
+    # check offline commands first — same as /run
+    offline_result = detect_offline_command(msg)
+    if offline_result:
+        reply, route_hint = offline_result
+        def offline_gen():
+            yield f"data: {reply}\n\n"
+            yield "data: [DONE]\n\n"
+        return Response(stream_with_context(offline_gen()),
+                        mimetype="text/event-stream")
+
+    # route and build system prompt
+    route        = route_model(msg, personality)
+    system_prompt = build_system_prompt(personality, route)
+    model_cfg    = MODELS.get(route, MODELS["fast"])
+    model        = model_cfg["primary"]["model"]
+    provider     = model_cfg["primary"]["provider"]
+
+    # only Groq supports streaming in current stack
+    if provider == "groq":
+        gen = _stream_groq(msg, model, system_prompt, short_term, device_id)
+    else:
+        # non-Groq provider — fall back to full response, wrap as single chunk
+        answer = call_provider(msg, provider, model, system_prompt,
+                               short_term, device_id)
+        if not answer:
+            answer = call_provider(msg, model_cfg["fallback"]["provider"],
+                                   model_cfg["fallback"]["model"],
+                                   system_prompt, short_term, device_id)
+        final = answer or "I could not get a response right now."
+        short_term.append({"role": "user",     "content": msg})
+        short_term.append({"role": "assistant", "content": final})
+        trim_short_term(short_term)
+        def wrapped():
+            yield f"data: {final}\n\n"
+            yield "data: [DONE]\n\n"
+        gen = wrapped()
+
+    return Response(
+        stream_with_context(gen),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control":               "no-cache",
+            "X-Accel-Buffering":           "no",   # disable nginx buffering
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 @app.route("/tts", methods=["POST"])
 def tts():
