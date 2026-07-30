@@ -2075,23 +2075,6 @@ def process(msg: str, device_id: str):
                                system_prompt, short_term, device_id)
     if not answer:
         for m in ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "mixtral-8x7b-32768"]:
-            answer = _call_groq(msg, m, system_prompt
-                short_term.append({"role": "user", "content": msg})
-                short_term.append({"role": "assistant", "content": clean})
-                trim_short_term(short_term)
-                return clean, trigger
-
-    model_cfg = MODELS.get(route, MODELS["fast"])
-    answer = call_provider(msg, model_cfg["primary"]["provider"],
-                           model_cfg["primary"]["model"],
-                           system_prompt, short_term, device_id)
-    if not answer:
-        print("[Process] Primary failed, trying fallback")
-        answer = call_provider(msg, model_cfg["fallback"]["provider"],
-                               model_cfg["fallback"]["model"],
-                               system_prompt, short_term, device_id)
-    if not answer:
-        for m in ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "mixtral-8x7b-32768"]:
             answer = _call_groq(msg, m, system_prompt, short_term)
             if answer:
                 break
