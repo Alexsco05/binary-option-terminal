@@ -40,6 +40,7 @@ NEWS_KEY      = os.getenv("NEWS_KEY", "")
 OPENAI_KEY    = os.getenv("OPENAI_API_KEY", "")
 BRAVE_SEARCH_KEY = os.getenv("BRAVE_SEARCH_KEY", "")  # kept for backwards compat
 SERPER_KEY       = os.getenv("SERPER_KEY", "")
+FIRECRAWL_KEY    = os.getenv("FIRECRAWL_KEY", "")
 DEVICE_SECRET = os.getenv("DEVICE_SECRET", "gideon-dev-secret-change-in-railway")
 
 # ── shared HTTP session — reuses connections, cuts latency ────────
@@ -561,6 +562,42 @@ def web_search(query: str) -> str:
         return "\n".join(lines[:6])
     except Exception as e:
         print(f"[Search] exception: {e}")
+        return ""
+
+# ================================================================
+# FIRECRAWL — FULL PAGE READER
+# ----------------------------------------------------------------
+# Model emits [READ:url] to fetch full webpage content.
+# Free tier: 500 credits/month, 1 credit per scrape.
+# ================================================================
+def extract_read_trigger(reply: str):
+    m = re.search(r'\[READ:([^\]]+)\]', reply)
+    if m:
+        url   = m.group(1).strip()[:500]
+        clean = re.sub(r'\[READ:[^\]]+\]', '', reply).strip()
+        return clean, url
+    return reply, None
+
+def firecrawl_read(url: str) -> str:
+    if not FIRECRAWL_KEY:
+        print("[Firecrawl] FIRECRAWL_KEY not configured")
+        return ""
+    try:
+        r = requests.post(
+            "https://api.firecrawl.dev/v1/scrape",
+            headers={
+                "Authorization": f"Bearer {FIRECRAWL_KEY}",
+                "Content-Type":  "application/json",
+            },
+            json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
+            timeout=20,
+        )
+        if r.status_code != 200:
+            print(f"[Firecrawl] HTTP {r.status_code}")
+            return ""
+        return r.json().get("data", {}).get("markdown", "")[:4000].strip()
+    except Exception as e:
+        print(f"[Firecrawl] error: {e}")
         return ""
 
 # ================================================================
@@ -1165,10 +1202,19 @@ def build_system_prompt(personality: dict, route: str = "fast") -> str:
         f"Use [SEARCH:query] only when the question requires current "
         f"information you would not reliably know — recent news, live "
         f"prices, recent events, or anything where being out of date "
-        f"gives a wrong answer. End the reply with the tag and nothing "
-        f"else — you will receive results and answer again. "
+        f"gives a wrong answer. Your ENTIRE reply must be just the tag — "
+        f"no lead-in sentence, no 'let me check', nothing before or "
+        f"after it. You will receive results and answer again. "
         f"Do not search for timeless knowledge you already know confidently. "
         f"One search per message maximum.\n\n"
+
+        f"WEB READING:\n"
+        f"Use [READ:url] when you need the full content of a specific "
+        f"webpage — to summarize an article, extract details from a site, "
+        f"or verify live information. Your ENTIRE reply must be just the "
+        f"tag — no lead-in sentence, nothing before or after it. You "
+        f"will receive the page content and answer again. "
+        f"Only use URLs you are confident exist. One read per message.\n\n"
 
         # ── FORMATTING ────────────────────────────────────────────
         f"FORMATTING:\n"
@@ -1253,19 +1299,25 @@ def _call_groq(msg: str, model: str, system_prompt: str, short_term: list, retri
 # arrive. Android starts TTS on the first sentence while the rest
 # is still being generated — this is what makes replies feel instant.
 # ================================================================
-def _stream_groq(msg: str, model: str, system_prompt: str,
-                 short_term: list, device_id: str):
+def _stream_groq(model_input: str, msg: str, model: str, system_prompt: str,
+                 short_term: list, device_id: str, route: str = "fast"):
     """
     Generator yielding SSE-formatted sentence chunks.
     Format  : data: <sentence>\n\n
     Done    : data: [DONE]\n\n
     Action  : data: [ACTION:<cmd>]\n\n
     Error   : data: [ERROR]<message>\n\n
+
+    model_input is what actually gets sent to Groq (may have weather/
+    news context folded in). msg is the original user text, used for
+    search/read follow-up prompts and for what gets persisted to
+    short_term — same split process() already uses for weather/news,
+    kept consistent here.
     """
-    is_complex = len(msg.split()) > 8
+    is_complex = len(model_input.split()) > 8
     messages   = list(short_term)
     messages[0] = {"role": "system", "content": system_prompt}
-    messages.append({"role": "user", "content": msg})
+    messages.append({"role": "user", "content": model_input})
 
     for key in GROQ_KEYS:
         if not key:
@@ -1325,24 +1377,86 @@ def _stream_groq(msg: str, model: str, system_prompt: str,
                         else:
                             continue
                         if sentence:
-                            yield f"data: {sentence}\n\n"
+                            yield f"data: {_clean_for_route(sentence, route)}\n\n"
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
 
-            # yield remaining buffer
-            if buffer.strip():
-                yield f"data: {buffer.strip()}\n\n"
+            # ── TAG RESOLUTION ──────────────────────────────────────
+            # Everything above was already sent to the client in real
+            # time as soon as a sentence boundary was hit. Only the
+            # leftover trailing buffer — whatever had no punctuation to
+            # trigger an earlier yield — is still being held back, and
+            # that's exactly where a [SEARCH:...], [READ:...] or
+            # [ACTION:...] tag ends up, since the model is instructed
+            # to end its reply with the tag and nothing else. This used
+            # to just dump that buffer straight to the client raw,
+            # which is why "[SEARCH:latest news]" showed up as a chat
+            # bubble instead of triggering an actual search.
+            spoken_tail = buffer.strip()
+            tag_consumed = False
+            resolved = full_text
 
-            # send action trigger if present
-            _, action_trigger = extract_action_trigger(full_text)
+            pre_search_clean, search_query = extract_search_trigger(resolved)
+            if search_query:
+                tag_consumed = True
+                print(f"[Stream][Search] Model requested search: '{search_query}'")
+                results = web_search(search_query)
+                if results:
+                    followup_prompt = (
+                        f"User asked: {msg}\n\n"
+                        f"You searched for: {search_query}\n"
+                        f"Search results:\n{results}\n\n"
+                        f"Now answer the user's question naturally using "
+                        f"these results. Do not mention that you searched "
+                        f"or show raw results — just answer as yourself."
+                    )
+                    followup = call_provider(followup_prompt, "groq", model,
+                                             system_prompt, short_term, device_id)
+                    resolved = followup or pre_search_clean or (
+                        "I searched but could not put together an answer. "
+                        "Please try again."
+                    )
+                else:
+                    resolved = pre_search_clean.strip() or (
+                        "I don't have live search access right now. "
+                        "Let me answer from what I know."
+                    )
+
+            pre_read_clean, read_url = extract_read_trigger(resolved)
+            if read_url:
+                tag_consumed = True
+                print(f"[Stream][Firecrawl] Model requested read: '{read_url}'")
+                page_content = firecrawl_read(read_url)
+                if page_content:
+                    followup = call_provider(
+                        f"User asked: {msg}\n\nYou read: {read_url}\n"
+                        f"Content:\n{page_content}\n\nAnswer naturally.",
+                        "groq", model, system_prompt, short_term, device_id
+                    )
+                    resolved = followup or pre_read_clean or "I could not read that page."
+                else:
+                    resolved = pre_read_clean.strip() or "I could not access that page right now."
+
+            clean_final, action_trigger = extract_action_trigger(resolved)
+            clean_final = _clean_for_route(clean_final, route)
+
+            if tag_consumed:
+                for chunk in _split_into_sentence_chunks(clean_final):
+                    yield f"data: {chunk}\n\n"
+            elif spoken_tail:
+                tail_clean, _ = extract_action_trigger(spoken_tail)
+                if tail_clean.strip():
+                    yield f"data: {_clean_for_route(tail_clean, route)}\n\n"
+
             if action_trigger and action_trigger not in ("None", "null"):
                 yield f"data: [ACTION:{action_trigger}]\n\n"
 
-            # update memory
+            # update memory with what the user actually heard, never
+            # the raw tag text
             short_term.append({"role": "user",     "content": msg})
-            short_term.append({"role": "assistant", "content": full_text})
+            short_term.append({"role": "assistant", "content": clean_final})
             trim_short_term(short_term)
-            EXECUTOR.submit(update_long_term, msg, full_text, device_id)
+            EXECUTOR.submit(update_long_term, msg, clean_final, device_id)
             extract_facts(msg, device_id)
 
             yield "data: [DONE]\n\n"
@@ -1739,7 +1853,6 @@ def generate_tts_base64(text: str, voice: str = "onyx") -> tuple:
 
     return "", f"Both TTS providers failed. Edge: {error} | OpenAI: {error2}"
 
-
 # ================================================================
 # WEATHER & NEWS
 # ================================================================
@@ -1799,13 +1912,21 @@ def get_news() -> str:
 # ================================================================
 # MAIN PROCESS
 # ================================================================
-def process(msg: str, device_id: str):
-    msg = msg.strip()
-    if not msg:
-        return "No input received.", None
-    if len(msg) > 2000:
-        return "Message too long. Please keep it shorter.", None
+def resolve_immediate_reply(msg: str, device_id: str):
+    """
+    Shared short-circuit path used by BOTH /run and /stream, in this
+    order: pending confirmation, cache, intent detection, offline
+    command. Returns (reply, action_trigger) if one of these produced
+    a complete answer, or None if the caller should continue on to
+    full AI routing.
 
+    This used to exist twice — once correctly inside process() for
+    typed chat, and once as a broken partial copy inside /stream that
+    only handled offline commands, and did so by unpacking a plain
+    string into two variables (crashes on every offline command said
+    during a voice session). Having one shared version means /run and
+    /stream can no longer drift apart on this logic.
+    """
     # 1. pending confirmation
     conf = check_user_confirmation(msg, device_id)
     if conf is not None:
@@ -1860,6 +1981,57 @@ def process(msg: str, device_id: str):
             return clean, final_action
         return "On it.", action_trigger
 
+    return None
+
+
+# ================================================================
+# STREAMING HELPERS — shared between /stream's Groq path and its
+# non-Groq fallback path, so both apply the same math/route cleanup
+# and the same sentence-pacing for non-streamed follow-up answers.
+# ================================================================
+def _split_into_sentence_chunks(text: str):
+    """Splits a full block of text (e.g. a non-streamed follow-up
+    answer) into sentence-sized SSE chunks so it still arrives as
+    several pieces instead of one big pause-then-dump."""
+    text = (text or "").strip()
+    if not text:
+        return
+    pieces = re.split(r'(?<=[.!?])\s+', text)
+    buf = ""
+    for p in pieces:
+        buf = f"{buf} {p}".strip() if buf else p
+        if len(buf) > 40:
+            yield buf
+            buf = ""
+    if buf:
+        yield buf
+
+
+def _clean_for_route(text: str, route: str) -> str:
+    """Same formatting rule process() already applies: math route keeps
+    real $$ blocks for the WebView renderer and only strips stray inline
+    $ wrapping, everything else gets full LaTeX-to-unicode conversion.
+    /stream never applied either of these before, so voice replies with
+    formulas came through as raw LaTeX."""
+    if route == "math":
+        return strip_stray_inline_dollars(text)
+    return latex_to_unicode(text)
+
+
+def process(msg: str, device_id: str):
+    msg = msg.strip()
+    if not msg:
+        return "No input received.", None
+    if len(msg) > 2000:
+        return "Message too long. Please keep it shorter.", None
+
+    shortcut = resolve_immediate_reply(msg, device_id)
+    if shortcut is not None:
+        return shortcut
+
+    personality   = load_personality(device_id)
+    cache_key     = f"{device_id}:{msg.lower()}"
+
     # 5. AI routing
     route         = route_model(msg, personality)
     system_prompt = build_system_prompt(personality, route)
@@ -1887,6 +2059,23 @@ def process(msg: str, device_id: str):
             if ans:
                 clean, trigger = extract_action_trigger(ans)
                 clean = latex_to_unicode(clean)
+                short_term.append({"role": "user", "content": msg})
+                short_term.append({"role": "assistant", "content": clean})
+                trim_short_term(short_term)
+                return clean, trigger
+
+    model_cfg = MODELS.get(route, MODELS["fast"])
+    answer = call_provider(msg, model_cfg["primary"]["provider"],
+                           model_cfg["primary"]["model"],
+                           system_prompt, short_term, device_id)
+    if not answer:
+        print("[Process] Primary failed, trying fallback")
+        answer = call_provider(msg, model_cfg["fallback"]["provider"],
+                               model_cfg["fallback"]["model"],
+                               system_prompt, short_term, device_id)
+    if not answer:
+        for m in ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "mixtral-8x7b-32768"]:
+            answer = _call_groq(msg, m, system_prompt
                 short_term.append({"role": "user", "content": msg})
                 short_term.append({"role": "assistant", "content": clean})
                 trim_short_term(short_term)
@@ -1949,6 +2138,21 @@ def process(msg: str, device_id: str):
                 answer = pre_search_clean
             else:
                 answer = "I don't have live search access right now. Let me answer from what I know."
+
+    # ── FIRECRAWL READ (model-triggered) ─────────────────────────
+    pre_read_clean, read_url = extract_read_trigger(answer)
+    if read_url:
+        print(f"[Firecrawl] Model requested read: '{read_url}'")
+        page_content = firecrawl_read(read_url)
+        if page_content:
+            followup = call_provider(
+                f"User asked: {msg}\n\nYou read: {read_url}\nContent:\n{page_content}\n\nAnswer naturally.",
+                model_cfg["primary"]["provider"], model_cfg["primary"]["model"],
+                system_prompt, short_term, device_id
+            )
+            answer = followup or pre_read_clean or "I could not read that page."
+        else:
+            answer = pre_read_clean.strip() or "I could not access that page right now."
 
     clean, action_trigger = extract_action_trigger(answer)
     if route != "math":
@@ -2078,12 +2282,24 @@ def stream_response():
     user_name = clean_name(str(data.get("user_name", "User"))[:100]) or "User"
     nickname  = clean_name(str(data.get("nickname",  user_name))[:100]) or user_name
     device_id = safe_device_id(str(data.get("device_id", "default"))[:100].strip() or "default")
+    device_tok = str(data.get("device_token", ""))
 
     if not msg:
         def empty():
             yield "data: [ERROR]Empty message.\n\n"
             yield "data: [DONE]\n\n"
         return Response(stream_with_context(empty()),
+                        mimetype="text/event-stream")
+
+    # device token check — same soft enforcement as /run. Previously
+    # /stream skipped this entirely, so voice sessions were an open
+    # door even after /run's auth got tightened.
+    if device_tok and not verify_device_token(device_id, device_tok):
+        print(f"[Security] Invalid device token for {device_id}")
+        def unauthorized():
+            yield "data: [ERROR]Authentication failed.\n\n"
+            yield "data: [DONE]\n\n"
+        return Response(stream_with_context(unauthorized()),
                         mimetype="text/event-stream")
 
     if is_rate_limited(device_id):
@@ -2101,20 +2317,32 @@ def stream_response():
             p["name"]     = nickname
             save_personality(p, device_id)
 
+    # ── SAME SHORT-CIRCUIT PATH AS /run ─────────────────────────────
+    # Pending confirmations, cache, intent detection ("should I open
+    # WhatsApp?"), and offline commands now go through the exact same
+    # logic typed chat uses. This used to be a separate, incomplete
+    # copy here that only handled offline commands, and did so by
+    # unpacking a plain string into two variables — which raised an
+    # unhandled ValueError on every offline command said during a
+    # voice session (e.g. "what time is it", "battery level", "lock
+    # my phone") and killed the stream.
+    shortcut = resolve_immediate_reply(msg, device_id)
+    if shortcut is not None:
+        reply, action_trigger = shortcut
+        def shortcut_gen():
+            chunks = list(_split_into_sentence_chunks(reply))
+            for chunk in (chunks or [reply]):
+                yield f"data: {chunk}\n\n"
+            if action_trigger and action_trigger not in ("None", "null"):
+                yield f"data: [ACTION:{action_trigger}]\n\n"
+            yield "data: [DONE]\n\n"
+        return Response(stream_with_context(shortcut_gen()),
+                        mimetype="text/event-stream")
+
     personality  = load_personality(device_id)
     short_term   = USER_SHORT_TERM.setdefault(
         device_id, [{"role": "system", "content": ""}]
     )
-
-    # check offline commands first — same as /run
-    offline_result = detect_offline_command(msg)
-    if offline_result:
-        reply, route_hint = offline_result
-        def offline_gen():
-            yield f"data: {reply}\n\n"
-            yield "data: [DONE]\n\n"
-        return Response(stream_with_context(offline_gen()),
-                        mimetype="text/event-stream")
 
     # route and build system prompt
     route        = route_model(msg, personality)
@@ -2123,23 +2351,95 @@ def stream_response():
     model        = model_cfg["primary"]["model"]
     provider     = model_cfg["primary"]["provider"]
 
+    # weather/news get the same direct-API treatment /run already uses,
+    # instead of relying on the model to request a search for them.
+    # Previously /stream had no version of this at all, so a spoken
+    # "how's the weather" would route to the model with no real data
+    # and typically fall through to the (broken) search-tag path.
+    model_input = msg
+    if route == "weather":
+        city = extract_city_from_weather_query(msg)
+        weather = get_weather(city)
+        if weather:
+            model_input = f"User: {msg}\nWeather: {weather}\nRespond naturally."
+    elif route == "news":
+        news = get_news()
+        if news:
+            model_input = f"User: {msg}\nNews: {news}\nSummarise naturally."
+
     # only Groq supports streaming in current stack
     if provider == "groq":
-        gen = _stream_groq(msg, model, system_prompt, short_term, device_id)
+        gen = _stream_groq(model_input, msg, model, system_prompt,
+                           short_term, device_id, route)
     else:
-        # non-Groq provider — fall back to full response, wrap as single chunk
-        answer = call_provider(msg, provider, model, system_prompt,
+        # non-Groq provider — no native token streaming, but still needs
+        # the same search/read/action handling as everything else, or
+        # those requests silently break for whichever provider ends up
+        # here. Previously this branch also never called
+        # update_long_term/extract_facts, so long-term memory and
+        # personality facts were never captured for these turns.
+        answer = call_provider(model_input, provider, model, system_prompt,
                                short_term, device_id)
         if not answer:
-            answer = call_provider(msg, model_cfg["fallback"]["provider"],
+            answer = call_provider(model_input, model_cfg["fallback"]["provider"],
                                    model_cfg["fallback"]["model"],
                                    system_prompt, short_term, device_id)
-        final = answer or "I could not get a response right now."
+        answer = answer or "I could not get a response right now."
+
+        pre_search_clean, search_query = extract_search_trigger(answer)
+        if search_query:
+            print(f"[Stream][Search] Model requested search: '{search_query}'")
+            results = web_search(search_query)
+            if results:
+                followup_prompt = (
+                    f"User asked: {msg}\n\n"
+                    f"You searched for: {search_query}\n"
+                    f"Search results:\n{results}\n\n"
+                    f"Now answer the user's question naturally using "
+                    f"these results. Do not mention that you searched "
+                    f"or show raw results — just answer as yourself."
+                )
+                followup = call_provider(followup_prompt, provider, model,
+                                         system_prompt, short_term, device_id)
+                answer = followup or pre_search_clean or (
+                    "I searched but could not put together an answer. "
+                    "Please try again."
+                )
+            else:
+                answer = pre_search_clean.strip() or (
+                    "I don't have live search access right now. "
+                    "Let me answer from what I know."
+                )
+
+        pre_read_clean, read_url = extract_read_trigger(answer)
+        if read_url:
+            print(f"[Stream][Firecrawl] Model requested read: '{read_url}'")
+            page_content = firecrawl_read(read_url)
+            if page_content:
+                followup = call_provider(
+                    f"User asked: {msg}\n\nYou read: {read_url}\n"
+                    f"Content:\n{page_content}\n\nAnswer naturally.",
+                    provider, model, system_prompt, short_term, device_id
+                )
+                answer = followup or pre_read_clean or "I could not read that page."
+            else:
+                answer = pre_read_clean.strip() or "I could not access that page right now."
+
+        final, action_trigger = extract_action_trigger(answer)
+        final = _clean_for_route(final, route)
+
         short_term.append({"role": "user",     "content": msg})
         short_term.append({"role": "assistant", "content": final})
         trim_short_term(short_term)
+        EXECUTOR.submit(update_long_term, msg, final, device_id)
+        extract_facts(msg, device_id)
+
         def wrapped():
-            yield f"data: {final}\n\n"
+            chunks = list(_split_into_sentence_chunks(final))
+            for chunk in (chunks or [final]):
+                yield f"data: {chunk}\n\n"
+            if action_trigger and action_trigger not in ("None", "null"):
+                yield f"data: [ACTION:{action_trigger}]\n\n"
             yield "data: [DONE]\n\n"
         gen = wrapped()
 
@@ -2198,6 +2498,7 @@ def health_internal():
         "tts": bool(OPENAI_KEY),
         "brave_search": bool(BRAVE_SEARCH_KEY),  # legacy
         "web_search":   bool(SERPER_KEY),
+        "firecrawl":    bool(FIRECRAWL_KEY),
         "cache_size": len(CACHE),
         "active_device_count": len(USER_SHORT_TERM),
     })
