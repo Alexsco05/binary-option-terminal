@@ -116,7 +116,13 @@ MODELS = {
     },
     "complex": {
         "primary":  {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
-        "fallback": {"provider": "gemini",     "model": "gemini-1.5-flash"},
+        # gemini-1.5-flash was fully shut down by Google — this was
+        # silently 404ing on every fallback. gemini-3.5-flash is
+        # current GA with no shutdown date announced as of this
+        # writing, but Google's retirement cadence is fast; check
+        # https://ai.google.dev/gemini-api/docs/deprecations
+        # periodically rather than assuming this stays valid forever.
+        "fallback": {"provider": "gemini",     "model": "gemini-3.5-flash"},
     },
     "creative": {
         "primary":  {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
@@ -757,6 +763,13 @@ def detect_offline_command(msg: str):
             continue
         for p in patterns:
             if p in ml:
+                # "calculate" patterns include very loose substrings like
+                # " plus ", " minus ", " times " which match ordinary
+                # conversation ("how many times have I asked you") far
+                # more often than real math requests. Real calculations
+                # almost always include an actual digit, so require one.
+                if cmd == "calculate" and not re.search(r'\d', ml):
+                    continue
                 return cmd
     return None
 
@@ -924,12 +937,30 @@ def build_intent_response(intent: str, msg: str, personality: dict, device_id: s
         "intent_battery":         (f"{n}checking your battery.", "battery level"),
         "intent_lock":            (f"{n}locking your phone now.", "lock my phone"),
         "intent_screenshot":      (f"{n}taking a screenshot.", "take screenshot"),
-        "intent_weather":         (f"{n}checking the weather.", "weather"),
-        "intent_news":            (f"{n}getting the latest news.", "latest news"),
     }
     if intent in simple:
         reply, action = simple[intent]
         return reply, sanitize_action(action)
+
+    # These two used to return a canned "checking the weather" line with
+    # an action tag ("weather" / "latest news") that was never in the
+    # ALLOWED_ACTION_PREFIXES whitelist to begin with — so the reply
+    # promised to check, the tag silently got dropped downstream, and
+    # no real weather or news data was ever fetched or returned. Now
+    # they call the same functions the AI-routing weather/news path
+    # already uses correctly.
+    if intent == "intent_weather":
+        city = extract_city_from_weather_query(msg)
+        weather = get_weather(city)
+        if weather:
+            return f"{n}{weather}", None
+        return f"{n}I couldn't get the weather right now. Try again in a moment.", None
+
+    if intent == "intent_news":
+        news = get_news()
+        if news:
+            return f"{n}{news}", None
+        return f"{n}I couldn't get the news right now. Try again in a moment.", None
 
     if intent == "intent_sleep":
         store_pending(device_id, "sleep mode",
@@ -1040,6 +1071,31 @@ def route_model(msg: str, personality: dict) -> str:
         (["shut up", "stupid", "idiot", "useless", "hate you", "terrible",
           "worst", "rubbish", "nonsense", "dumb", "you are trash",
           "garbage", "pathetic"], "firm", False),
+        # ── these five were previously unreachable — SPECIALIST_BLOCKS
+        # defines "writing", "planning", "teaching", "research", and
+        # "business" specialists in full, but route_model() never had
+        # a rule that could actually select any of them, so every
+        # request that should have hit one fell into the generic
+        # "complex" catch-all instead. Placed before "complex" so
+        # first-match-wins routes these correctly now.
+        (["write a", "write me", "write an", "blog post", "short story",
+          "cover letter", "proofread", "rewrite this", "paraphrase",
+          "draft an email", "draft a message", "improve my writing",
+          "edit my writing", "summarize", "translate"], "writing", False),
+        (["plan my", "make a plan", "roadmap for", "schedule my",
+          "prioritize my", "project plan", "action plan",
+          "next steps for", "organize my", "timeline for",
+          "help me plan"], "planning", False),
+        (["teach me", "eli5", "explain like i'm five", "tutor me",
+          "quiz me", "walk me through", "help me learn",
+          "help me understand"], "teaching", False),
+        (["research about", "fact check", "is it true that",
+          "find sources on", "investigate", "look into",
+          "compare sources", "cite sources"], "research", False),
+        (["business plan", "startup idea", "revenue model",
+          "pricing strategy", "market analysis", "competitor analysis",
+          "pitch deck", "monetize", "profit margin", "business idea",
+          "go to market", "business strategy"], "business", False),
         (["how can i", "how do i", "how should i", "what should i do",
           "advice", "help me with", "i'm struggling", "i have a problem",
           "colleague", "coworker", "boss", "manager", "workplace",
@@ -1047,9 +1103,8 @@ def route_model(msg: str, personality: dict) -> str:
           "argument", "deal with", "handle", "improve", "become better",
           "learn how to", "what do you think", "your opinion", "recommend",
           "explain", "analyze", "compare", "why", "how does",
-          "difference between", "pros and cons", "write a", "summarize",
-          "translate", "essay", "story", "philosophy", "meaning of",
-          "history of"], "complex", False),
+          "difference between", "pros and cons", "essay", "story",
+          "philosophy", "meaning of", "history of"], "complex", False),
     ]
 
     # special case: "code" as a standalone word with explain framing
@@ -1623,7 +1678,7 @@ def _call_openrouter(msg: str, model: str, system_prompt: str, short_term: list)
             print(f"[OpenRouter {model}] {e}")
     return None
 
-def _call_gemini(msg: str, system_prompt: str, short_term: list):
+def _call_gemini(msg: str, model: str, system_prompt: str, short_term: list):
     if not GEMINI_KEY:
         return None
     try:
@@ -1637,7 +1692,7 @@ def _call_gemini(msg: str, system_prompt: str, short_term: list):
         full_prompt = f"{system_prompt}\n\n{history_text}User: {msg}"
         r = SESSION.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
+            f"{model}:generateContent?key={GEMINI_KEY}",
             json={"contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
                   "generationConfig": {"maxOutputTokens": 1500}},
             timeout=18,
@@ -1701,7 +1756,7 @@ def call_provider(msg, provider, model, system_prompt, short_term, device_id):
     if provider == "openrouter":
         return _call_openrouter(msg, model, system_prompt, short_term)
     if provider == "gemini":
-        return _call_gemini(msg, system_prompt, short_term)
+        return _call_gemini(msg, model, system_prompt, short_term)
     if provider == "cohere":
         return _call_cohere(msg, system_prompt, short_term)
     if provider == "mistral":
@@ -1875,8 +1930,11 @@ def convert_math_for_speech(text: str) -> str:
 
 def _clean_for_speech(text: str) -> str:
     """Strips markdown/action-tags and converts math notation into
-    natural spoken phrasing, then truncates to a safe length."""
-    clean = re.sub(r'\[ACTION:[^\]]*\]', '', text)
+    natural spoken phrasing, then truncates to a safe length.
+    Reuses extract_action_trigger's balanced-brace tag stripping
+    instead of a separate regex, so a JSON tool payload can't leave
+    trailing debris that TTS would read out loud."""
+    clean, _ = extract_action_trigger(text)
     clean = convert_math_for_speech(clean)
     clean = re.sub(r'#{1,3}\s*', '', clean)
     clean = re.sub(r'\*\*([^*]+)\*\*', r'\1', clean)
