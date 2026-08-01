@@ -188,6 +188,16 @@ ALLOWED_ACTION_PREFIXES = [
     "work mode", "start work mode", "morning routine", "start my day",
 ]
 
+# JSON-shaped tool calls (sms, calendar, email, etc.) can't be checked
+# against a prefix whitelist the way plain-English commands can, so they
+# get their own validation: the "tool" key must be one of these, and the
+# JSON must actually parse. Anything else is dropped, same safety intent
+# as ALLOWED_ACTION_PREFIXES above.
+ALLOWED_TOOLS = {
+    "sms", "calendar", "email", "clipboard", "navigate",
+    "location", "whatsapp", "contact", "filesearch",
+}
+
 def is_action_allowed(action: str) -> bool:
     if not action:
         return False
@@ -195,11 +205,38 @@ def is_action_allowed(action: str) -> bool:
     return any(al.startswith(p) or p in al[:40] for p in ALLOWED_ACTION_PREFIXES)
 
 def sanitize_action(action):
-    """Returns the action only if it passes the whitelist, else None."""
-    if action and is_action_allowed(action):
-        return action
-    if action:
-        print(f"[Security] Blocked unrecognized action: '{action}'")
+    """
+    Returns the action only if it passes validation, else None.
+
+    Two accepted shapes:
+      1. Legacy plain-English device commands ("open whatsapp",
+         "flashlight on", etc.) — checked against
+         ALLOWED_ACTION_PREFIXES, unchanged from before.
+      2. JSON tool calls ({"tool": "sms", "params": {...}}) — checked
+         against ALLOWED_TOOLS instead, since a prefix whitelist can't
+         validate a JSON blob. Re-serialized from the parsed dict
+         rather than passed through as raw model text, so what reaches
+         the phone is always well-formed JSON built only from keys the
+         model actually produced.
+    Anything that matches neither shape is dropped rather than
+    forwarded.
+    """
+    if not action:
+        return None
+    stripped = action.strip()
+    if stripped.startswith("{"):
+        parsed = _safe_json_loads(stripped)
+        if not isinstance(parsed, dict):
+            print(f"[Security] Malformed tool action_trigger dropped: {stripped[:120]}")
+            return None
+        tool = parsed.get("tool")
+        if tool not in ALLOWED_TOOLS:
+            print(f"[Security] Unknown tool in action_trigger dropped: {tool}")
+            return None
+        return json.dumps(parsed)
+    if is_action_allowed(stripped):
+        return stripped
+    print(f"[Security] Blocked unrecognized action: '{stripped[:120]}'")
     return None
 
 # ================================================================
@@ -208,6 +245,8 @@ def sanitize_action(action):
 CACHE                 = TTLCache(maxsize=2000, ttl=1800)   # 30 min, size-capped
 USER_SHORT_TERM       = {}
 PENDING_CONFIRMATIONS = {}
+KNOWLEDGE_STORE        = {}  # device_id -> {node_id: {label, category, related_to}}
+_KNOWLEDGE_GUARD        = threading.Lock()
 MEMORY_LIMIT          = 20
 
 def get_short_term(device_id: str):
@@ -486,10 +525,15 @@ def _extract_facts_bg(user_msg: str, device_id: str):
 # ACTION TRIGGER PARSER
 # ================================================================
 def extract_action_trigger(reply: str):
-    m = re.search(r'\[ACTION:([^\]]+)\]', reply)
+    # Greedy match to the LAST ] in the reply, not the first. The old
+    # [^\]]+ version stopped at the first ], which is fine for plain
+    # command phrases (they never contain ]) but would silently
+    # truncate a JSON tool payload if any param value ever contained
+    # a ] character.
+    m = re.search(r'\[ACTION:(.+)\]', reply, re.DOTALL)
     if m:
         action = m.group(1).strip()
-        clean  = re.sub(r'\[ACTION:[^\]]+\]', '', reply).strip()
+        clean  = re.sub(r'\[ACTION:.+\]', '', reply, flags=re.DOTALL).strip()
         return clean, sanitize_action(action)
     return reply, None
 
@@ -1216,6 +1260,27 @@ def build_system_prompt(personality: dict, route: str = "fast") -> str:
         f"will receive the page content and answer again. "
         f"Only use URLs you are confident exist. One read per message.\n\n"
 
+        # ── DEVICE TOOLS ───────────────────────────────────────────
+        f"DEVICE TOOLS:\n"
+        f"For these specific actions, put a JSON payload inside the same "
+        f"[ACTION:...] tag instead of a plain-English command. The JSON "
+        f"must be valid, with no markdown fences or extra text around it: "
+        f"[ACTION:{{\"tool\": \"<tool_name>\", \"params\": {{...}}}}]\n\n"
+        f"Available tools:\n"
+        f"sms       — {{\"number\": \"+234...\", \"message\": \"...\"}}\n"
+        f"calendar  — {{\"title\": \"...\", \"date\": \"YYYY-MM-DD\", \"time\": \"HH:MM\"}}\n"
+        f"email     — {{\"to\": \"...\", \"subject\": \"...\", \"body\": \"...\"}}\n"
+        f"clipboard — {{\"text\": \"...\"}}\n"
+        f"navigate  — {{\"destination\": \"...\"}}\n"
+        f"location  — {{}}\n"
+        f"whatsapp  — {{\"number\": \"+234...\", \"message\": \"...\"}}\n"
+        f"contact   — {{\"name\": \"...\", \"phone\": \"...\"}}\n"
+        f"filesearch— {{\"query\": \"...\"}}\n\n"
+        f"Only emit this when the user's request clearly calls for one "
+        f"of these actions. Never invent a tool name outside this list — "
+        f"anything else is dropped before it reaches the phone. "
+        f"Otherwise respond normally with no action tag.\n\n"
+
         # ── FORMATTING ────────────────────────────────────────────
         f"FORMATTING:\n"
         f"Use ## headings and - bullets only in longer structured answers. "
@@ -1255,6 +1320,30 @@ def _call_groq_raw(prompt: str):
                 return d["choices"][0]["message"]["content"]
         except Exception as e:
             print(f"[GroqRaw] {e}")
+    return None
+
+def _call_groq_raw_extended(prompt: str, max_tokens: int = 1200):
+    """Same as _call_groq_raw, but with a higher token ceiling for
+    extraction-style calls that need to return a structured list rather
+    than one short reply. Kept separate so the existing fact-extraction
+    call (which works fine at 500 tokens) isn't touched."""
+    for key in GROQ_KEYS:
+        if not key:
+            continue
+        try:
+            r = SESSION.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={"model": "llama-3.3-70b-versatile",
+                      "messages": [{"role": "user", "content": prompt}],
+                      "max_tokens": max_tokens},
+                timeout=12,
+            )
+            d = r.json()
+            if "choices" in d:
+                return d["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"[GroqRawExtended] {e}")
     return None
 
 def _call_groq(msg: str, model: str, system_prompt: str, short_term: list, retries: int = 2):
@@ -2435,6 +2524,402 @@ def stream_response():
             "Access-Control-Allow-Origin": "*",
         },
     )
+
+def _normalize_label(label: str) -> str:
+    return re.sub(r'[^a-z0-9\s]', '', label.lower()).strip()
+
+def _get_knowledge(device_id: str) -> dict:
+    return KNOWLEDGE_STORE.setdefault(device_id, {})
+
+def merge_nodes(device_id: str, extracted_nodes: list) -> dict:
+    """
+    Folds freshly extracted nodes into this device's running knowledge
+    graph. Duplicate detection is a simple normalized-label match —
+    good enough to prove out linking and search before anything
+    fancier (embeddings) is worth building. related_to links are
+    treated as undirected: if A relates to B, B relates to A.
+    """
+    store = _get_knowledge(device_id)
+
+    with _KNOWLEDGE_GUARD:
+        label_to_id = {n["label_norm"]: nid for nid, n in store.items()}
+        local_to_global = {}  # this batch's node ids -> store-wide ids
+
+        for n in extracted_nodes:
+            label = str(n.get("label", "")).strip()
+            if not label:
+                continue
+            norm = _normalize_label(label)
+            if norm in label_to_id:
+                global_id = label_to_id[norm]
+            else:
+                global_id = f"k{len(store) + 1}"
+                store[global_id] = {
+                    "label":       label,
+                    "label_norm":  norm,
+                    "category":    str(n.get("category", "")).strip() or "idea",
+                    "related_to":  set(),
+                }
+                label_to_id[norm] = global_id
+            local_to_global[n.get("id")] = global_id
+
+        for n in extracted_nodes:
+            src = local_to_global.get(n.get("id"))
+            if not src:
+                continue
+            for rel in (n.get("related_to") or []):
+                dst = local_to_global.get(rel)
+                if dst and dst != src:
+                    store[src]["related_to"].add(dst)
+                    store[dst]["related_to"].add(src)
+
+    return store
+
+@app.route("/extract-knowledge", methods=["POST"])
+def extract_knowledge():
+    """
+    Phase 2 prototype. Pulls structured concept nodes out of a device's
+    recent LIVE conversation (whatever is currently in short_term).
+
+    This is a read-only test — nothing gets persisted here, intentionally.
+    The point is to judge extraction quality by eye before any graph
+    storage or canvas UI gets built on top of it. If this doesn't
+    produce meaningful nodes on real conversations, nothing downstream
+    is worth building yet.
+    """
+    data      = request.get_json(silent=True) or {}
+    device_id = safe_device_id(str(data.get("device_id", "default"))[:100].strip() or "default")
+    turns     = int(data.get("turns", 10))
+    turns     = max(1, min(turns, 40))  # keep the prompt a sane size
+
+    short_term = get_short_term(device_id)
+    convo = short_term[1:]            # index 0 is always the system message
+    convo = convo[-(turns * 2):]      # last N user+assistant exchanges
+
+    if not convo:
+        return jsonify({
+            "nodes": [],
+            "note": "No recent conversation found for this device_id."
+        })
+
+    transcript = "\n".join(
+        f"{'User' if m.get('role') == 'user' else 'Gideon'}: {m.get('content', '')}"
+        for m in convo if m.get("content")
+    )
+
+    prompt = (
+        "Extract concept nodes from this conversation. A node is a "
+        "meaningful topic, project, person, tool, or idea that was "
+        "actually discussed, not every noun that appears. Merge obvious "
+        "duplicates into one node. Return ONLY valid JSON, this exact shape:\n"
+        '{"nodes": [{"id": "n1", "label": "short label", '
+        '"category": "one word", "related_to": ["n2"]}]}\n'
+        "Categories should be simple words like: project, person, tool, "
+        "idea, task, place. related_to lists the ids of OTHER nodes in "
+        "this same response that this node connects to — leave it empty "
+        "if there's no clear connection. If nothing meaningful is present, "
+        'return {"nodes": []}. No text outside the JSON.\n\n'
+        f"Conversation:\n{transcript}"
+    )
+
+    raw = _call_groq_raw_extended(prompt)
+    if not raw:
+        return jsonify({"nodes": [], "note": "Extraction call failed."}), 200
+
+    clean = raw.strip().replace("```json", "").replace("```", "").strip()
+    s, e = clean.find("{"), clean.rfind("}") + 1
+    if s < 0 or e <= 0:
+        return jsonify({
+            "nodes": [], "note": "Model did not return JSON.", "raw": raw[:300]
+        })
+
+    parsed = _safe_json_loads(clean[s:e])
+    if not parsed or "nodes" not in parsed:
+        return jsonify({
+            "nodes": [], "note": "Could not parse extraction result.", "raw": raw[:300]
+        })
+
+    store = merge_nodes(device_id, parsed.get("nodes", []))
+
+    return jsonify({
+        "nodes": parsed.get("nodes", []),
+        "total_nodes_stored": len(store),
+    })
+
+@app.route("/search-knowledge", methods=["POST"])
+def search_knowledge():
+    """
+    Keyword search over this device's in-memory knowledge graph.
+    Matches against label and category, returns each hit plus its
+    directly linked nodes so a search result shows immediate context,
+    not just an isolated fact.
+    """
+    data      = request.get_json(silent=True) or {}
+    device_id = safe_device_id(str(data.get("device_id", "default"))[:100].strip() or "default")
+    query     = str(data.get("query", "")).strip().lower()
+
+    if not query:
+        return jsonify({"results": [], "note": "Empty query."})
+
+    store = _get_knowledge(device_id)
+    matches = [
+        nid for nid, n in store.items()
+        if query in n["label"].lower() or query in n["category"].lower()
+    ]
+
+    results = []
+    for nid in matches:
+        n = store[nid]
+        related = [
+            {"id": rid, "label": store[rid]["label"], "category": store[rid]["category"]}
+            for rid in n["related_to"] if rid in store
+        ]
+        results.append({
+            "id": nid, "label": n["label"], "category": n["category"],
+            "related": related,
+        })
+
+    return jsonify({"results": results, "total_nodes_stored": len(store)})
+
+@app.route("/knowledge/<device_id>", methods=["GET"])
+def view_knowledge(device_id):
+    """Dumps the full in-memory graph for one device — for eyeballing
+    whether extraction and linking actually make sense, not a client-
+    facing endpoint."""
+    device_id = safe_device_id(device_id)
+    store = _get_knowledge(device_id)
+    nodes = [
+        {
+            "id": nid, "label": n["label"], "category": n["category"],
+            "related_to": sorted(n["related_to"]),
+        }
+        for nid, n in store.items()
+    ]
+    return jsonify({"nodes": nodes, "total": len(nodes)})
+
+@app.route("/debug/devices", methods=["GET"])
+def debug_devices():
+    """
+    Lists every device_id currently active in short-term memory, with a
+    preview of their last exchange, so you can find your own device_id
+    without digging through Android code or Railway logs. In-memory
+    only, so this only shows devices that have talked to Gideon since
+    the last restart.
+    """
+    devices = []
+    for device_id, st in USER_SHORT_TERM.items():
+        convo = [m for m in st if m.get("role") in ("user", "assistant")]
+        last = convo[-1]["content"][:80] if convo else ""
+        devices.append({
+            "device_id": device_id,
+            "exchanges": len(convo) // 2,
+            "last_message": last,
+        })
+    return jsonify({"devices": devices})
+
+@app.route("/debug/knowledge", methods=["GET"])
+def debug_knowledge_page():
+    """
+    A self-contained debug page for the Phase 2/3 knowledge tools —
+    no curl, no separate REST client app needed. Pick a device, run
+    extraction, search, or view the full graph, all from a phone
+    browser. Debug-only, not part of the actual product.
+    """
+    html = """
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gideon — Knowledge Debug</title>
+  <style>
+    body { font-family: sans-serif; background:#0d1117; color:#e6edf3; padding:16px; }
+    h2 { color:#58a6ff; }
+    select, input, button { width:100%; padding:10px; margin:6px 0; border-radius:6px;
+      border:1px solid #30363d; background:#161b22; color:#e6edf3; box-sizing:border-box; }
+    button { background:#238636; border:none; font-weight:bold; cursor:pointer; }
+    button.secondary { background:#1f6feb; }
+    pre { background:#161b22; padding:10px; border-radius:6px; overflow-x:auto;
+      white-space:pre-wrap; word-break:break-word; font-size:13px; }
+    .row { display:flex; gap:8px; }
+    .row > * { flex:1; }
+  </style>
+</head>
+<body>
+  <h2>Gideon Knowledge Debug</h2>
+
+  <label>Device</label>
+  <select id="deviceSelect"><option>Loading devices...</option></select>
+  <button class="secondary" onclick="loadDevices()">Refresh device list</button>
+
+  <label>Turns to extract from</label>
+  <input id="turns" type="number" value="10" min="1" max="40">
+  <button onclick="extract()">Extract Knowledge</button>
+
+  <label>Search query</label>
+  <input id="query" type="text" placeholder="e.g. voice">
+  <div class="row">
+    <button onclick="search()">Search</button>
+    <button class="secondary" onclick="viewGraph()">View Full Graph</button>
+  </div>
+
+  <pre id="output">Results will appear here.</pre>
+  <canvas id="graphCanvas" style="display:none; width:100%; height:400px; background:#161b22; border-radius:6px; margin-top:10px;"></canvas>
+
+  <script>
+    const out = document.getElementById('output');
+
+    async function loadDevices() {
+      out.textContent = "Loading...";
+      const r = await fetch('/debug/devices');
+      const d = await r.json();
+      const sel = document.getElementById('deviceSelect');
+      sel.innerHTML = '';
+      if (!d.devices.length) {
+        sel.innerHTML = '<option>No active devices found</option>';
+        out.textContent = "No devices have talked to Gideon since the last restart.";
+        return;
+      }
+      d.devices.forEach(dev => {
+        const opt = document.createElement('option');
+        opt.value = dev.device_id;
+        opt.textContent = `${dev.device_id}  (${dev.exchanges} exchanges — "${dev.last_message}")`;
+        sel.appendChild(opt);
+      });
+      out.textContent = JSON.stringify(d, null, 2);
+    }
+
+    function currentDevice() {
+      const sel = document.getElementById('deviceSelect');
+      return sel.value || 'default';
+    }
+
+    async function extract() {
+      document.getElementById('graphCanvas').style.display = 'none';
+      out.textContent = "Extracting...";
+      const turns = parseInt(document.getElementById('turns').value) || 10;
+      const r = await fetch('/extract-knowledge', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({device_id: currentDevice(), turns})
+      });
+      out.textContent = JSON.stringify(await r.json(), null, 2);
+    }
+
+    async function search() {
+      document.getElementById('graphCanvas').style.display = 'none';
+      out.textContent = "Searching...";
+      const query = document.getElementById('query').value;
+      const r = await fetch('/search-knowledge', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({device_id: currentDevice(), query})
+      });
+      out.textContent = JSON.stringify(await r.json(), null, 2);
+    }
+
+    async function viewGraph() {
+      out.textContent = "Loading graph...";
+      const r = await fetch('/knowledge/' + encodeURIComponent(currentDevice()));
+      const data = await r.json();
+      out.textContent = JSON.stringify(data, null, 2);
+      if (data.nodes && data.nodes.length) {
+        drawGraph(data);
+      }
+    }
+
+    // Lightweight force-directed layout, drawn on canvas. No external
+    // libraries — this is just a debug-page sanity check for whether
+    // the extracted graph is worth ever building a real canvas UI for
+    // (see roadmap Phase 10), not a component meant to ship in the app.
+    function drawGraph(data) {
+      const canvas = document.getElementById('graphCanvas');
+      canvas.style.display = 'block';
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width  = canvas.clientWidth;
+      const H = canvas.height = 400;
+
+      const nodes = data.nodes.map(n => ({
+        id: n.id, label: n.label, category: n.category,
+        x: Math.random() * W, y: Math.random() * H, vx: 0, vy: 0,
+      }));
+      const idIndex = {};
+      nodes.forEach((n, i) => idIndex[n.id] = i);
+      const edges = [];
+      data.nodes.forEach(n => {
+        (n.related_to || []).forEach(rid => {
+          if (idIndex[rid] !== undefined) edges.push([idIndex[n.id], idIndex[rid]]);
+        });
+      });
+
+      const palette = ['#58a6ff','#3fb950','#f0883e','#db61a2','#a371f7','#e3b341','#f85149'];
+      const colors = {};
+      let colorIdx = 0;
+      function colorFor(cat) {
+        if (!colors[cat]) { colors[cat] = palette[colorIdx % palette.length]; colorIdx++; }
+        return colors[cat];
+      }
+
+      let frame = 0;
+      function tick() {
+        for (let i = 0; i < nodes.length; i++) {
+          for (let j = i + 1; j < nodes.length; j++) {
+            const a = nodes[i], b = nodes[j];
+            let dx = a.x - b.x, dy = a.y - b.y;
+            let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+            const force = 1200 / (dist * dist);
+            dx /= dist; dy /= dist;
+            a.vx += dx * force; a.vy += dy * force;
+            b.vx -= dx * force; b.vy -= dy * force;
+          }
+        }
+        edges.forEach(([i, j]) => {
+          const a = nodes[i], b = nodes[j];
+          let dx = b.x - a.x, dy = b.y - a.y;
+          let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+          const force = dist * 0.01;
+          dx /= dist; dy /= dist;
+          a.vx += dx * force; a.vy += dy * force;
+          b.vx -= dx * force; b.vy -= dy * force;
+        });
+        nodes.forEach(n => {
+          n.vx += (W / 2 - n.x) * 0.001;
+          n.vy += (H / 2 - n.y) * 0.001;
+          n.vx *= 0.85; n.vy *= 0.85;
+          n.x += n.vx; n.y += n.vy;
+          n.x = Math.max(20, Math.min(W - 20, n.x));
+          n.y = Math.max(20, Math.min(H - 20, n.y));
+        });
+
+        ctx.clearRect(0, 0, W, H);
+        ctx.strokeStyle = '#30363d';
+        edges.forEach(([i, j]) => {
+          ctx.beginPath();
+          ctx.moveTo(nodes[i].x, nodes[i].y);
+          ctx.lineTo(nodes[j].x, nodes[j].y);
+          ctx.stroke();
+        });
+        nodes.forEach(n => {
+          ctx.fillStyle = colorFor(n.category);
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, 7, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#e6edf3';
+          ctx.font = '11px sans-serif';
+          ctx.fillText(n.label, n.x + 9, n.y + 4);
+        });
+
+        frame++;
+        if (frame < 300) requestAnimationFrame(tick);
+      }
+      tick();
+    }
+
+    loadDevices();
+  </script>
+</body>
+</html>
+    """
+    return Response(html, mimetype="text/html")
 
 @app.route("/tts", methods=["POST"])
 def tts():
