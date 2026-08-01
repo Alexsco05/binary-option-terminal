@@ -525,16 +525,53 @@ def _extract_facts_bg(user_msg: str, device_id: str):
 # ACTION TRIGGER PARSER
 # ================================================================
 def extract_action_trigger(reply: str):
-    # Greedy match to the LAST ] in the reply, not the first. The old
-    # [^\]]+ version stopped at the first ], which is fine for plain
-    # command phrases (they never contain ]) but would silently
-    # truncate a JSON tool payload if any param value ever contained
-    # a ] character.
-    m = re.search(r'\[ACTION:(.+)\]', reply, re.DOTALL)
-    if m:
-        action = m.group(1).strip()
-        clean  = re.sub(r'\[ACTION:.+\]', '', reply, flags=re.DOTALL).strip()
+    """
+    Finds the first [ACTION:...] tag and extracts its content.
+
+    JSON payloads get a balanced-brace scan rather than a regex, so:
+      - a ] inside a JSON array param doesn't get mistaken for the
+        tag's closing bracket
+      - a second [ACTION:...] tag later in the same reply doesn't get
+        swallowed into the first one (the old greedy .+ regex did
+        exactly this — grabbed everything up to the LAST ] in the
+        whole message, mangling both tags into one malformed blob)
+    Only the first tag in a reply is honored; the model is instructed
+    to send at most one per message.
+    """
+    idx = reply.find('[ACTION:')
+    if idx == -1:
+        return reply, None
+
+    start   = idx + len('[ACTION:')
+    content = reply[start:]
+
+    if content.lstrip().startswith('{'):
+        depth, end = 0, None
+        for i, ch in enumerate(content):
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end is None:
+            return reply, None  # unterminated JSON, nothing safe to extract
+        action   = content[:end].strip()
+        tag_end  = start + end
+        if tag_end < len(reply) and reply[tag_end] == ']':
+            tag_end += 1
+        clean = (reply[:idx] + reply[tag_end:]).strip()
         return clean, sanitize_action(action)
+
+    # legacy plain-text command — stop at the first ], same as before
+    m = re.match(r'([^\]]+)\]', content)
+    if m:
+        action  = m.group(1).strip()
+        tag_end = start + m.end()
+        clean   = (reply[:idx] + reply[tag_end:]).strip()
+        return clean, sanitize_action(action)
+
     return reply, None
 
 # ================================================================
@@ -1237,6 +1274,9 @@ def build_system_prompt(personality: dict, route: str = "fast") -> str:
         f"device operation (open an app, call someone, change a setting, "
         f"set an alarm, control flashlight/wifi/bluetooth/DND, take a "
         f"screenshot, lock the phone, etc). "
+        f"Only ONE [ACTION:...] tag per reply, ever. If the request needs "
+        f"more than one action, do the first one and ask {name} to "
+        f"confirm before doing the next. "
         f"Do not infer an action from general conversation. "
         f"If the requested action is outside your capabilities, say so "
         f"plainly — no action tag.\n\n"
@@ -2107,6 +2147,117 @@ def _clean_for_route(text: str, route: str) -> str:
     return latex_to_unicode(text)
 
 
+def _looks_multi_part(msg: str) -> bool:
+    """
+    Cheap heuristic deciding whether a request is worth actually
+    planning and executing step by step, versus the normal single-shot
+    path everything already uses. Deliberately conservative: a false
+    negative just means the existing, already-working path handles it
+    exactly as it did before this phase existed. A false positive costs
+    one extra small planning call. Short or simple messages never reach
+    this check's cost at all — plan_steps only runs if this returns True.
+    """
+    if len(msg.split()) < 12:
+        return False
+    ml = msg.lower()
+    markers = (" and then ", " then ", " after that ", " also ",
+               " first ", " next ", " and also ")
+    return msg.count("?") > 1 or any(m in ml for m in markers)
+
+def plan_steps(msg: str, device_id: str) -> list:
+    """
+    Asks the model to break a request into an ordered list of
+    self-contained steps, ONLY called after _looks_multi_part already
+    said yes. Always returns a usable list: on any failure (call
+    fails, bad JSON, empty result) it returns [msg] unchanged, which
+    the caller treats as "not actually multi-part" and falls through
+    to the normal single-shot path. Capped at 5 steps as a sanity
+    limit against a runaway plan.
+    """
+    prompt = (
+        "Break this request into an ordered list of separate, "
+        "self-contained steps, only if it genuinely has multiple "
+        "distinct parts. Each step should be answerable on its own, "
+        "with enough context to stand alone. Return ONLY valid JSON: "
+        '{"steps": ["step one", "step two"]}. '
+        'If this is really just one request, return {"steps": ["<the original request>"]}.\n\n'
+        f"Request: {msg}"
+    )
+    raw = _call_groq_raw_extended(prompt, max_tokens=400)
+    if not raw:
+        return [msg]
+    clean = raw.strip().replace("```json", "").replace("```", "").strip()
+    s, e = clean.find("{"), clean.rfind("}") + 1
+    if s < 0 or e <= 0:
+        return [msg]
+    parsed = _safe_json_loads(clean[s:e])
+    steps = parsed.get("steps") if parsed else None
+    if not steps or not isinstance(steps, list):
+        return [msg]
+    steps = [str(s).strip() for s in steps if str(s).strip()]
+    return steps[:5] if steps else [msg]
+
+def process_multi_step(msg: str, device_id: str):
+    """
+    Genuine step-by-step execution for requests that actually have
+    more than one distinct part. Each step runs through the same
+    routing and model-calling machinery any single message already
+    uses, and results are combined into one reply, so a request like
+    "check the weather, then remind me to bring an umbrella" gets both
+    parts handled instead of hoping one model call covers both.
+
+    Returns None whenever the request doesn't genuinely have multiple
+    parts (the common case), meaning process() falls straight through
+    to the existing single-shot path completely unchanged. Nothing
+    about how single-part requests are handled is touched by this.
+
+    Scoped to /run (typed chat) only for now — see the note in
+    process() for why voice sessions aren't wired to this yet.
+    """
+    if not _looks_multi_part(msg):
+        return None
+
+    steps = plan_steps(msg, device_id)
+    if len(steps) <= 1:
+        return None
+
+    print(f"[Planner] '{msg[:60]}' -> {len(steps)} step(s): {steps}")
+
+    personality    = load_personality(device_id)
+    short_term     = get_short_term(device_id)
+    answers        = []
+    action_trigger = None
+
+    for step in steps:
+        route         = route_model(step, personality)
+        system_prompt = build_system_prompt(personality, route)
+        model_cfg     = MODELS.get(route, MODELS["fast"])
+
+        answer = call_provider(step, model_cfg["primary"]["provider"],
+                               model_cfg["primary"]["model"], system_prompt,
+                               short_term, device_id)
+        if not answer:
+            answer = call_provider(step, model_cfg["fallback"]["provider"],
+                                   model_cfg["fallback"]["model"],
+                                   system_prompt, short_term, device_id)
+
+        clean, action = extract_action_trigger(answer or "I couldn't complete that part.")
+        clean = _clean_for_route(clean, route)
+        answers.append(clean)
+        if action and not action_trigger:
+            action_trigger = action  # only the first step's action reaches the phone
+
+    combined = " ".join(a.strip() for a in answers if a and a.strip())
+
+    short_term.append({"role": "user",      "content": msg})
+    short_term.append({"role": "assistant", "content": combined})
+    trim_short_term(short_term)
+    EXECUTOR.submit(update_long_term, msg, combined, device_id)
+    extract_facts(msg, device_id)
+
+    return combined, action_trigger
+
+
 def process(msg: str, device_id: str):
     msg = msg.strip()
     if not msg:
@@ -2117,6 +2268,15 @@ def process(msg: str, device_id: str):
     shortcut = resolve_immediate_reply(msg, device_id)
     if shortcut is not None:
         return shortcut
+
+    # Phase 4 — only engages for requests that genuinely look multi-part;
+    # returns None immediately otherwise, so this adds no latency or
+    # behavior change to the normal single-shot case below. Voice
+    # sessions (/stream) intentionally don't call this yet — see
+    # process_multi_step's docstring.
+    multi = process_multi_step(msg, device_id)
+    if multi is not None:
+        return multi
 
     personality   = load_personality(device_id)
     cache_key     = f"{device_id}:{msg.lower()}"
@@ -2709,7 +2869,9 @@ def debug_devices():
     devices = []
     for device_id, st in USER_SHORT_TERM.items():
         convo = [m for m in st if m.get("role") in ("user", "assistant")]
-        last = convo[-1]["content"][:80] if convo else ""
+        if not convo:
+            continue  # skip empty/phantom entries — nothing to extract from anyway
+        last = convo[-1]["content"][:80]
         devices.append({
             "device_id": device_id,
             "exchanges": len(convo) // 2,
@@ -2775,8 +2937,11 @@ def debug_knowledge_page():
       const sel = document.getElementById('deviceSelect');
       sel.innerHTML = '';
       if (!d.devices.length) {
-        sel.innerHTML = '<option>No active devices found</option>';
-        out.textContent = "No devices have talked to Gideon since the last restart.";
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'No active devices yet — talk to Gideon first';
+        sel.appendChild(opt);
+        out.textContent = "No devices have talked to Gideon since the last restart. Send it a message, then tap Refresh.";
         return;
       }
       d.devices.forEach(dev => {
@@ -2790,40 +2955,57 @@ def debug_knowledge_page():
 
     function currentDevice() {
       const sel = document.getElementById('deviceSelect');
-      return sel.value || 'default';
+      return sel.value || null;
+    }
+
+    function requireDevice() {
+      const id = currentDevice();
+      if (!id) {
+        out.textContent = "No real device selected. Talk to Gideon first, then tap Refresh device list, then pick your device from the dropdown.";
+        return null;
+      }
+      return id;
     }
 
     async function extract() {
+      const device_id = requireDevice();
+      if (!device_id) return;
       document.getElementById('graphCanvas').style.display = 'none';
       out.textContent = "Extracting...";
       const turns = parseInt(document.getElementById('turns').value) || 10;
       const r = await fetch('/extract-knowledge', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({device_id: currentDevice(), turns})
+        body: JSON.stringify({device_id, turns})
       });
       out.textContent = JSON.stringify(await r.json(), null, 2);
     }
 
     async function search() {
+      const device_id = requireDevice();
+      if (!device_id) return;
       document.getElementById('graphCanvas').style.display = 'none';
       out.textContent = "Searching...";
       const query = document.getElementById('query').value;
       const r = await fetch('/search-knowledge', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({device_id: currentDevice(), query})
+        body: JSON.stringify({device_id, query})
       });
       out.textContent = JSON.stringify(await r.json(), null, 2);
     }
 
     async function viewGraph() {
+      const device_id = requireDevice();
+      if (!device_id) return;
       out.textContent = "Loading graph...";
-      const r = await fetch('/knowledge/' + encodeURIComponent(currentDevice()));
+      const r = await fetch('/knowledge/' + encodeURIComponent(device_id));
       const data = await r.json();
       out.textContent = JSON.stringify(data, null, 2);
       if (data.nodes && data.nodes.length) {
         drawGraph(data);
+      } else {
+        out.textContent += "\n\nNo nodes stored yet for this device. Run Extract Knowledge first.";
       }
     }
 
