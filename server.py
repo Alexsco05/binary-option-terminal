@@ -688,6 +688,103 @@ def firecrawl_read(url: str) -> str:
         return ""
 
 # ================================================================
+# RESEARCH MODE (Phase 6) — wires search + read + extraction into
+# one pipeline, rather than new capability of its own.
+# ================================================================
+def web_search_with_links(query: str, num: int = 5) -> list:
+    """
+    Like web_search(), but returns structured results with URLs intact
+    instead of a display-formatted string. web_search()'s output drops
+    links entirely since it's built for showing snippets in a reply —
+    Research Mode needs the actual URLs to hand to firecrawl_read().
+    Returns [] on any failure.
+    """
+    if not SERPER_KEY:
+        return []
+    try:
+        r = requests.post(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": SERPER_KEY, "Content-Type": "application/json"},
+            json={"q": query, "num": num},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return []
+        results = r.json().get("organic", [])[:num]
+        return [
+            {
+                "title":   item.get("title", "").strip(),
+                "snippet": re.sub(r'<[^>]+>', '', item.get("snippet", "").strip()),
+                "url":     item.get("link", "").strip(),
+            }
+            for item in results if item.get("link")
+        ]
+    except Exception as e:
+        print(f"[Research] search exception: {e}")
+        return []
+
+def run_research(topic: str, device_id: str, max_pages: int = 3) -> dict:
+    """
+    Phase 6: search, read the top pages, synthesize a summary, and
+    store what was learned as knowledge nodes using the same Phase 2/3
+    extraction and merge logic already built and tested. This is what
+    makes "research X" meaningfully different from just asking the
+    model directly — it gathers current information from real sources
+    instead of answering from training data alone.
+
+    Deliberately conservative on Firecrawl calls (max_pages default 3)
+    since the free tier is 500 credits/month, one credit per page read.
+    Falls back to search snippets alone if page reads all fail — still
+    useful, just shallower.
+    """
+    results = web_search_with_links(topic, num=5)
+    if not results:
+        return {"topic": topic, "summary": "", "sources": [], "nodes": [],
+                "note": "Search returned nothing — check SERPER_KEY or try a different phrasing."}
+
+    sources, page_texts = [], []
+    for item in results[:max_pages]:
+        content = firecrawl_read(item["url"])
+        if content:
+            sources.append({"title": item["title"], "url": item["url"]})
+            page_texts.append(f"### {item['title']} ({item['url']})\n{content[:2500]}")
+
+    if not page_texts:
+        page_texts = [f"- {r['title']}: {r['snippet']}" for r in results]
+        sources = [{"title": r["title"], "url": r["url"]} for r in results]
+
+    combined = "\n\n".join(page_texts)[:9000]
+
+    summary_prompt = (
+        f"Research topic: {topic}\n\n"
+        f"Sources gathered:\n{combined}\n\n"
+        "Write a clear, well-organized summary of what these sources say "
+        "about this topic. Note any disagreement between sources if there "
+        "is any. Do not add anything not supported by the text above."
+    )
+    summary = _call_groq_raw_extended(summary_prompt, max_tokens=900) or ""
+
+    nodes = []
+    if summary:
+        node_prompt = (
+            "Extract concept nodes from this research summary. A node is "
+            "a meaningful topic, person, place, or idea, not every noun. "
+            "Return ONLY valid JSON, this exact shape:\n"
+            '{"nodes": [{"id": "n1", "label": "short label", '
+            '"category": "one word", "related_to": ["n2"]}]}\n'
+            f"Summary:\n{summary}"
+        )
+        raw = _call_groq_raw_extended(node_prompt, max_tokens=700) or ""
+        clean = raw.strip().replace("```json", "").replace("```", "").strip()
+        s, e = clean.find("{"), clean.rfind("}") + 1
+        parsed = _safe_json_loads(clean[s:e]) if s >= 0 and e > 0 else None
+        nodes = parsed.get("nodes", []) if parsed else []
+        if nodes:
+            merge_nodes(device_id, nodes)
+
+    return {"topic": topic, "summary": summary, "sources": sources, "nodes": nodes}
+
+# ================================================================
 # OFFLINE COMMAND DETECTION — word-boundary aware to cut false positives
 # ================================================================
 OFFLINE_COMMANDS = {
@@ -2793,6 +2890,27 @@ def merge_nodes(device_id: str, extracted_nodes: list) -> dict:
 
     return store
 
+@app.route("/research", methods=["POST"])
+def research_endpoint():
+    """
+    Phase 6. POST {device_id, topic} -> searches, reads the top pages,
+    summarizes, and stores extracted nodes into that device's running
+    knowledge graph (same store /extract-knowledge and /search-knowledge
+    already use). Read-and-write, unlike /extract-knowledge which is
+    read-only against existing conversation — this one goes out and
+    gathers new information.
+    """
+    data      = request.get_json(silent=True) or {}
+    device_id = safe_device_id(str(data.get("device_id", "default"))[:100].strip() or "default")
+    topic     = str(data.get("topic", "")).strip()[:300]
+
+    if not topic:
+        return jsonify({"topic": "", "summary": "", "sources": [], "nodes": [],
+                        "note": "No topic provided."})
+
+    result = run_research(topic, device_id)
+    return jsonify(result)
+
 @app.route("/extract-knowledge", methods=["POST"])
 def extract_knowledge():
     """
@@ -2975,6 +3093,10 @@ def debug_knowledge_page():
   <input id="turns" type="number" value="10" min="1" max="40">
   <button onclick="extract()">Extract Knowledge</button>
 
+  <label>Research topic (Phase 6 — searches + reads real pages, slower)</label>
+  <input id="researchTopic" type="text" placeholder="e.g. lithium battery recycling in Nigeria">
+  <button onclick="research()">Research This</button>
+
   <label>Search query</label>
   <input id="query" type="text" placeholder="e.g. voice">
   <div class="row">
@@ -3035,6 +3157,24 @@ def debug_knowledge_page():
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({device_id, turns})
+      });
+      out.textContent = JSON.stringify(await r.json(), null, 2);
+    }
+
+    async function research() {
+      const device_id = requireDevice();
+      if (!device_id) return;
+      const topic = document.getElementById('researchTopic').value.trim();
+      if (!topic) {
+        out.textContent = "Enter a research topic first.";
+        return;
+      }
+      document.getElementById('graphCanvas').style.display = 'none';
+      out.textContent = "Researching \"" + topic + "\" — searching, reading pages, summarizing. This can take 10-30 seconds...";
+      const r = await fetch('/research', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({device_id, topic})
       });
       out.textContent = JSON.stringify(await r.json(), null, 2);
     }
