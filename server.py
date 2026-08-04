@@ -192,6 +192,37 @@ ALLOWED_ACTION_PREFIXES = [
     "strict mode", "focus mode", "discipline mode",
     "study mode", "start studying", "sleep mode", "bedtime mode",
     "work mode", "start work mode", "morning routine", "start my day",
+
+    # Added: these were fully missing before, meaning OfflineCommandHandler
+    # supported them on the Android side but sanitize_action() dropped
+    # every attempt to trigger them, silently, no matter how the model
+    # phrased the request. Wording matches OfflineCommandHandler.kt's own
+    # msg.contains() checks exactly, so passing this whitelist and
+    # matching on-device rely on the same words.
+    "game mode", "reading mode", "commute mode",
+    "presentation mode", "meeting mode", "emergency",
+    "phone health", "optimize", "daily report", "end of day",
+    "my score", "how productive", "productivity",
+    "screen time", "phone usage",
+    "unlock", "split screen", "split app",
+    "hotspot", "vpn settings", "open vpn", "nfc settings", "open nfc",
+    "developer settings", "developer options",
+    "language settings", "keyboard settings", "input settings",
+    "date settings", "time settings", "change date", "change time",
+    "security settings", "screen lock", "fingerprint", "face unlock",
+    "accessibility settings", "open accessibility",
+    "app settings", "manage apps", "installed apps",
+    "notification settings", "manage notifications",
+    "about phone", "about device", "device model",
+    "gps settings", "location settings",
+    "power off menu", "power menu",
+    "airplane mode", "flight mode", "gaming mode",
+    "battery saver", "battery settings", "power saving",
+    "turn on data", "turn off data", "data on", "data off",
+    "mobile data on", "mobile data off", "disable data", "enable data",
+    "turn on location", "turn off location", "turn on screen",
+    "my tasks", "task done", "finished task", "new task",
+    "pending tasks", "what are my tasks",
 ]
 
 # JSON-shaped tool calls (sms, calendar, email, etc.) can't be checked
@@ -1581,7 +1612,8 @@ def _call_groq(msg: str, model: str, system_prompt: str, short_term: list, retri
 # is still being generated — this is what makes replies feel instant.
 # ================================================================
 def _stream_groq(model_input: str, msg: str, model: str, system_prompt: str,
-                 short_term: list, device_id: str, route: str = "fast"):
+                 short_term: list, device_id: str, route: str = "fast",
+                 fallback_cfg: dict = None):
     """
     Generator yielding SSE-formatted sentence chunks.
     Format  : data: <sentence>\n\n
@@ -1747,6 +1779,37 @@ def _stream_groq(model_input: str, msg: str, model: str, system_prompt: str,
             print(f"[Stream] Groq timeout on {model}")
         except Exception as e:
             print(f"[Stream] Groq {model} error: {e}")
+
+    # Every GROQ_KEYS attempt failed or rate-limited (this is the gap
+    # that was here before — model_cfg["fallback"] was configured and
+    # correct, but nothing in this function ever called it, so a Groq
+    # outage or hitting the daily token cap meant every request failed
+    # with the hardcoded error below regardless of what fallback was
+    # set up. Now it actually falls through to it.
+    if fallback_cfg:
+        print(f"[Stream] All Groq attempts failed, falling back to "
+              f"{fallback_cfg['provider']}/{fallback_cfg['model']}")
+        answer = call_provider(model_input, fallback_cfg["provider"],
+                               fallback_cfg["model"], system_prompt,
+                               short_term, device_id)
+        if answer:
+            final, action_trigger = extract_action_trigger(answer)
+            final = _clean_for_route(final, route)
+
+            short_term.append({"role": "user",     "content": msg})
+            short_term.append({"role": "assistant", "content": final})
+            trim_short_term(short_term)
+            EXECUTOR.submit(update_long_term, msg, final, device_id)
+            extract_facts(msg, device_id)
+
+            chunks = list(_split_into_sentence_chunks(final))
+            for chunk in (chunks or [final]):
+                yield f"data: {chunk}\n\n"
+            if action_trigger and action_trigger not in ("None", "null"):
+                yield f"data: [ACTION:{action_trigger}]\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        print(f"[Stream] Fallback {fallback_cfg['provider']} also failed")
 
     yield "data: [ERROR]I could not get a response. Please try again.\n\n"
     yield "data: [DONE]\n\n"
@@ -2757,7 +2820,8 @@ def stream_response():
     # only Groq supports streaming in current stack
     if provider == "groq":
         gen = _stream_groq(model_input, msg, model, system_prompt,
-                           short_term, device_id, route)
+                           short_term, device_id, route,
+                           fallback_cfg=model_cfg.get("fallback"))
     else:
         # non-Groq provider — no native token streaming, but still needs
         # the same search/read/action handling as everything else, or
@@ -3029,9 +3093,72 @@ def view_knowledge(device_id):
             "id": nid, "label": n["label"], "category": n["category"],
             "related_to": sorted(n["related_to"]),
         }
-        for nid, n in store.items()
+        for nid, n in list(store.items())
     ]
     return jsonify({"nodes": nodes, "total": len(nodes)})
+
+@app.route("/debug/keys", methods=["GET"])
+def debug_keys():
+    """
+    Checks every provider API key from inside the running process,
+    since sealing a Railway variable makes it write-only — the
+    dashboard won't show it back to you, and neither will `railway
+    variables`, but the app itself still has the real value in memory
+    and can use it. This is the only place that's still true, so
+    checking has to happen here rather than by pulling values out.
+
+    Never returns the actual key values, only per-key status, same
+    intent as check_keys.sh but runnable against sealed keys.
+
+    Uses lightweight models-list endpoints where the provider has one,
+    so checking doesn't itself burn into whatever quota you're trying
+    to check. Note: this confirms a key AUTHENTICATES and isn't
+    currently rate-limited, not remaining daily quota — a key can
+    check out fine here and still hit a token-per-day cap on a real
+    completion call, the same gap noted in check_keys.sh.
+    """
+    def check(label, key, url, params=None):
+        if not key:
+            return {"key": label, "status": "not set"}
+        try:
+            headers = {} if params else {"Authorization": f"Bearer {key}"}
+            r = requests.get(url, headers=headers, params=params, timeout=10)
+            if r.status_code == 200:
+                return {"key": label, "status": "active"}
+            if r.status_code in (401, 403):
+                return {"key": label, "status": "invalid or revoked", "http": r.status_code}
+            if r.status_code == 429:
+                return {"key": label, "status": "rate-limited right now", "http": 429}
+            return {"key": label, "status": "unexpected response", "http": r.status_code}
+        except requests.RequestException as e:
+            return {"key": label, "status": "no response / network error", "error": str(e)[:120]}
+
+    results = []
+    for i, key in enumerate(GROQ_KEYS, start=1):
+        results.append(check(f"Groq Key {i}", key,
+                             "https://api.groq.com/openai/v1/models"))
+    for i, key in enumerate(OPENROUTER_KEYS, start=1):
+        results.append(check(f"OpenRouter Key {i}", key,
+                             "https://openrouter.ai/api/v1/models"))
+    for i, key in enumerate(MISTRAL_KEYS, start=1):
+        results.append(check(f"Mistral Key {i}", key,
+                             "https://api.mistral.ai/v1/models"))
+    results.append(check("Cohere Key", COHERE_KEY,
+                         "https://api.cohere.com/v1/models"))
+    results.append(check("OpenAI Key", OPENAI_KEY,
+                         "https://api.openai.com/v1/models"))
+    results.append(check("Gemini Key", GEMINI_KEY,
+                         "https://generativelanguage.googleapis.com/v1beta/models",
+                         params={"key": GEMINI_KEY} if GEMINI_KEY else None))
+
+    return jsonify({
+        "results": results,
+        "note": ("Checks auth + current rate-limit status only, not "
+                 "remaining daily quota. OpenAI's /models can return "
+                 "200 even with billing exhausted, since listing "
+                 "models doesn't charge against quota the way "
+                 "completions do.")
+    })
 
 @app.route("/debug/devices", methods=["GET"])
 def debug_devices():
@@ -3043,8 +3170,14 @@ def debug_devices():
     the last restart.
     """
     devices = []
-    for device_id, st in USER_SHORT_TERM.items():
-        convo = [m for m in st if m.get("role") in ("user", "assistant")]
+    # snapshot with list(...) before iterating — USER_SHORT_TERM gets
+    # written to by every concurrent /run and /stream request, and
+    # iterating a live dict while another thread inserts a new device
+    # key raises "dictionary changed size during iteration" and 500s
+    # this whole endpoint, which is exactly what was leaving the debug
+    # page's device dropdown stuck on "Loading devices..." forever.
+    for device_id, st in list(USER_SHORT_TERM.items()):
+        convo = [m for m in list(st) if m.get("role") in ("user", "assistant")]
         if not convo:
             continue  # skip empty/phantom entries — nothing to extract from anyway
         last = convo[-1]["content"][:80]
@@ -3112,25 +3245,33 @@ def debug_knowledge_page():
 
     async function loadDevices() {
       out.textContent = "Loading...";
-      const r = await fetch('/debug/devices');
-      const d = await r.json();
       const sel = document.getElementById('deviceSelect');
-      sel.innerHTML = '';
-      if (!d.devices.length) {
-        const opt = document.createElement('option');
-        opt.value = '';
-        opt.textContent = 'No active devices yet — talk to Gideon first';
-        sel.appendChild(opt);
-        out.textContent = "No devices have talked to Gideon since the last restart. Send it a message, then tap Refresh.";
-        return;
+      try {
+        const r = await fetch('/debug/devices');
+        if (!r.ok) {
+          throw new Error(`Server returned ${r.status}`);
+        }
+        const d = await r.json();
+        sel.innerHTML = '';
+        if (!d.devices.length) {
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = 'No active devices yet — talk to Gideon first';
+          sel.appendChild(opt);
+          out.textContent = "No devices have talked to Gideon since the last restart. Send it a message, then tap Refresh.";
+          return;
+        }
+        d.devices.forEach(dev => {
+          const opt = document.createElement('option');
+          opt.value = dev.device_id;
+          opt.textContent = `${dev.device_id}  (${dev.exchanges} exchanges — "${dev.last_message}")`;
+          sel.appendChild(opt);
+        });
+        out.textContent = JSON.stringify(d, null, 2);
+      } catch (err) {
+        sel.innerHTML = '<option value="">Failed to load — tap Refresh to retry</option>';
+        out.textContent = "Could not load devices: " + err.message + "\n\nCheck Railway logs for the actual error, or tap Refresh device list to try again.";
       }
-      d.devices.forEach(dev => {
-        const opt = document.createElement('option');
-        opt.value = dev.device_id;
-        opt.textContent = `${dev.device_id}  (${dev.exchanges} exchanges — "${dev.last_message}")`;
-        sel.appendChild(opt);
-      });
-      out.textContent = JSON.stringify(d, null, 2);
     }
 
     function currentDevice() {
@@ -3153,12 +3294,17 @@ def debug_knowledge_page():
       document.getElementById('graphCanvas').style.display = 'none';
       out.textContent = "Extracting...";
       const turns = parseInt(document.getElementById('turns').value) || 10;
-      const r = await fetch('/extract-knowledge', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({device_id, turns})
-      });
-      out.textContent = JSON.stringify(await r.json(), null, 2);
+      try {
+        const r = await fetch('/extract-knowledge', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({device_id, turns})
+        });
+        if (!r.ok) throw new Error(`Server returned ${r.status}`);
+        out.textContent = JSON.stringify(await r.json(), null, 2);
+      } catch (err) {
+        out.textContent = "Extraction failed: " + err.message + "\n\nCheck Railway logs for details.";
+      }
     }
 
     async function research() {
@@ -3171,12 +3317,17 @@ def debug_knowledge_page():
       }
       document.getElementById('graphCanvas').style.display = 'none';
       out.textContent = "Researching \"" + topic + "\" — searching, reading pages, summarizing. This can take 10-30 seconds...";
-      const r = await fetch('/research', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({device_id, topic})
-      });
-      out.textContent = JSON.stringify(await r.json(), null, 2);
+      try {
+        const r = await fetch('/research', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({device_id, topic})
+        });
+        if (!r.ok) throw new Error(`Server returned ${r.status}`);
+        out.textContent = JSON.stringify(await r.json(), null, 2);
+      } catch (err) {
+        out.textContent = "Research failed: " + err.message + "\n\nCheck Railway logs for details.";
+      }
     }
 
     async function search() {
@@ -3185,25 +3336,35 @@ def debug_knowledge_page():
       document.getElementById('graphCanvas').style.display = 'none';
       out.textContent = "Searching...";
       const query = document.getElementById('query').value;
-      const r = await fetch('/search-knowledge', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({device_id, query})
-      });
-      out.textContent = JSON.stringify(await r.json(), null, 2);
+      try {
+        const r = await fetch('/search-knowledge', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({device_id, query})
+        });
+        if (!r.ok) throw new Error(`Server returned ${r.status}`);
+        out.textContent = JSON.stringify(await r.json(), null, 2);
+      } catch (err) {
+        out.textContent = "Search failed: " + err.message + "\n\nCheck Railway logs for details.";
+      }
     }
 
     async function viewGraph() {
       const device_id = requireDevice();
       if (!device_id) return;
       out.textContent = "Loading graph...";
-      const r = await fetch('/knowledge/' + encodeURIComponent(device_id));
-      const data = await r.json();
-      out.textContent = JSON.stringify(data, null, 2);
-      if (data.nodes && data.nodes.length) {
-        drawGraph(data);
-      } else {
-        out.textContent += "\n\nNo nodes stored yet for this device. Run Extract Knowledge first.";
+      try {
+        const r = await fetch('/knowledge/' + encodeURIComponent(device_id));
+        if (!r.ok) throw new Error(`Server returned ${r.status}`);
+        const data = await r.json();
+        out.textContent = JSON.stringify(data, null, 2);
+        if (data.nodes && data.nodes.length) {
+          drawGraph(data);
+        } else {
+          out.textContent += "\n\nNo nodes stored yet for this device. Run Extract Knowledge first.";
+        }
+      } catch (err) {
+        out.textContent = "Could not load graph: " + err.message + "\n\nCheck Railway logs for details.";
       }
     }
 
