@@ -35,6 +35,7 @@ MISTRAL_KEYS = [
 ]
 GEMINI_KEY    = os.getenv("GEMINI_KEY", "")
 COHERE_KEY    = os.getenv("COHERE_KEY", "")
+CEREBRAS_KEY  = os.getenv("CEREBRAS_KEY", "")
 WEATHER_KEY   = os.getenv("WEATHER_KEY", "")
 NEWS_KEY      = os.getenv("NEWS_KEY", "")
 OPENAI_KEY    = os.getenv("OPENAI_API_KEY", "")
@@ -110,47 +111,90 @@ MODELS = {
     # TPM limit than openai/gpt-oss-20b (which caps at 8k TPM and also
     # interprets [SEARCH:...] tags as native tool calls, breaking the
     # tag-based search system). 70b handles all route types well.
+    #
+    # "fallbacks" is a LIST now, tried in order, not a single dict.
+    # Deliberately diversified across providers rather than just
+    # models, a single provider hitting its own cap (Groq's TPD limit
+    # tonight is the exact real-world case) shouldn't be able to take
+    # an entire chain down with it. Cohere has been replaced with
+    # Cerebras throughout — same role, different provider.
     "fast": {
-        "primary":  {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
-        "fallback": {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
+        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "fallbacks": [
+            {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
+            {"provider": "cerebras",   "model": "llama-3.3-70b"},
+            {"provider": "mistral",    "model": "mistral-small-latest"},
+        ],
     },
     "complex": {
-        "primary":  {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
+        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
         # gemini-1.5-flash was fully shut down by Google — this was
         # silently 404ing on every fallback. gemini-3.5-flash is
         # current GA with no shutdown date announced as of this
         # writing, but Google's retirement cadence is fast; check
         # https://ai.google.dev/gemini-api/docs/deprecations
         # periodically rather than assuming this stays valid forever.
-        "fallback": {"provider": "gemini",     "model": "gemini-3.5-flash"},
+        "fallbacks": [
+            {"provider": "gemini",     "model": "gemini-3.5-flash"},
+            {"provider": "cerebras",   "model": "llama-3.3-70b"},
+            {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
+        ],
     },
     "creative": {
-        "primary":  {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
-        "fallback": {"provider": "mistral",    "model": "mistral-small-latest"},
+        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "fallbacks": [
+            {"provider": "mistral",    "model": "mistral-small-latest"},
+            {"provider": "openrouter", "model": "mistralai/mistral-7b-instruct:free"},
+            {"provider": "gemini",     "model": "gemini-3.5-flash"},
+        ],
     },
     "empathetic": {
-        "primary":  {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
-        "fallback": {"provider": "cohere",     "model": "command-r"},
+        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "fallbacks": [
+            {"provider": "cerebras",   "model": "llama-3.3-70b"},
+            {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
+            {"provider": "gemini",     "model": "gemini-3.5-flash"},
+        ],
     },
     "firm": {
-        "primary":  {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
-        "fallback": {"provider": "openrouter", "model": "mistralai/mistral-7b-instruct:free"},
+        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "fallbacks": [
+            {"provider": "openrouter", "model": "mistralai/mistral-7b-instruct:free"},
+            {"provider": "mistral",    "model": "mistral-small-latest"},
+            {"provider": "gemini",     "model": "gemini-3.5-flash"},
+        ],
     },
     "math": {
-        "primary":  {"provider": "openrouter", "model": "qwen/qwen-2-math-72b-instruct:free"},
-        "fallback": {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
+        "primary": {"provider": "openrouter", "model": "qwen/qwen-2-math-72b-instruct:free"},
+        "fallbacks": [
+            {"provider": "groq",     "model": "llama-3.3-70b-versatile"},
+            {"provider": "cerebras", "model": "llama-3.3-70b"},
+            {"provider": "mistral",  "model": "mistral-small-latest"},
+        ],
     },
     "coding": {
-        "primary":  {"provider": "openrouter", "model": "deepseek/deepseek-coder:free"},
-        "fallback": {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
+        "primary": {"provider": "openrouter", "model": "deepseek/deepseek-coder:free"},
+        "fallbacks": [
+            {"provider": "groq",     "model": "llama-3.3-70b-versatile"},
+            {"provider": "cerebras", "model": "llama-3.3-70b"},
+            {"provider": "mistral",  "model": "mistral-small-latest"},
+        ],
     },
     "weather": {
-        "primary":  {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
-        "fallback": {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
+        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "fallbacks": [
+            {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
+            {"provider": "mistral",    "model": "mistral-small-latest"},
+            {"provider": "gemini",     "model": "gemini-3.5-flash"},
+        ],
     },
     "news": {
-        "primary":  {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
-        "fallback": {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
+        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "fallbacks": [
+            {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
+            {"provider": "mistral",    "model": "mistral-small-latest"},
+            {"provider": "gemini",     "model": "gemini-3.5-flash"},
+        ],
     },
 }
 
@@ -232,7 +276,7 @@ ALLOWED_ACTION_PREFIXES = [
 # as ALLOWED_ACTION_PREFIXES above.
 ALLOWED_TOOLS = {
     "sms", "calendar", "email", "clipboard", "navigate",
-    "location", "whatsapp", "contact", "filesearch",
+    "location", "whatsapp", "contact", "filesearch", "device",
 }
 
 def is_action_allowed(action: str) -> bool:
@@ -1498,10 +1542,44 @@ def build_system_prompt(personality: dict, route: str = "fast") -> str:
         f"location  — {{}}\n"
         f"whatsapp  — {{\"number\": \"+234...\", \"message\": \"...\"}}\n"
         f"contact   — {{\"name\": \"...\", \"phone\": \"...\"}}\n"
-        f"filesearch— {{\"query\": \"...\"}}\n\n"
+        f"filesearch— {{\"query\": \"...\"}}\n"
+        f"  filesearch query MUST be a short, broad keyword — \"cv\", "
+        f"\"resume\", \"invoice\" — never a full guessed filename. You "
+        f"have no way of knowing a file's real name, timestamp, or "
+        f"extension, so guessing one (\"Alexander_CV_2024_Final.pdf\") "
+        f"almost always fails to match the real file even when it "
+        f"exists. One or two plain words gives the on-device search the "
+        f"best chance of finding it.\n"
+        f"device    — {{\"action\": \"<key>\"}}\n"
+        f"  Use for device settings and quick controls. action MUST be "
+        f"exactly one of these keys, nothing else:\n"
+        f"  volume_up, volume_down, volume_max, volume_min, volume_mute, "
+        f"volume_unmute, brightness_up, brightness_down, brightness_max, "
+        f"brightness_min, flashlight_on, flashlight_off, lock_screen, "
+        f"take_screenshot, wifi_on, wifi_off, bluetooth_on, bluetooth_off, "
+        f"dnd_on, dnd_off, silent_mode, vibrate_mode, ring_mode, "
+        f"mobile_data_on, mobile_data_off, location_on, location_off, "
+        f"airplane_mode, go_back, go_home, recent_apps, "
+        f"open_notifications, open_settings, open_quick_settings, "
+        f"battery_level, current_time, current_date, check_internet, "
+        f"storage_info, phone_model, wifi_name, read_clipboard, "
+        f"read_screen, play_music, pause_music, next_song, previous_song, "
+        f"study_mode, sleep_mode, work_mode, focus_mode, strict_mode, "
+        f"discipline_mode, morning_routine, gaming_mode, reading_mode, "
+        f"commute_mode, presentation_mode, meeting_mode, emergency_mode, "
+        f"add_task, complete_task, show_tasks, phone_health, "
+        f"daily_report, productivity_score, screen_time, battery_saver, "
+        f"unlock_apps, split_screen, power_menu, hotspot, vpn_settings, "
+        f"nfc_settings, developer_settings, language_settings, "
+        f"date_settings, time_settings, security_settings, "
+        f"accessibility_settings, app_settings, notification_settings, "
+        f"about_phone, gps_settings\n\n"
         f"Only emit this when the user's request clearly calls for one "
         f"of these actions. Never invent a tool name outside this list — "
-        f"anything else is dropped before it reaches the phone. "
+        f"anything else is dropped before it reaches the phone. For the "
+        f"device tool specifically, never invent an action key outside "
+        f"the list above either, an unrecognized key is silently "
+        f"dropped the same way. "
         f"Otherwise respond normally with no action tag.\n\n"
 
         # ── FORMATTING ────────────────────────────────────────────
@@ -1613,7 +1691,7 @@ def _call_groq(msg: str, model: str, system_prompt: str, short_term: list, retri
 # ================================================================
 def _stream_groq(model_input: str, msg: str, model: str, system_prompt: str,
                  short_term: list, device_id: str, route: str = "fast",
-                 fallback_cfg: dict = None):
+                 fallback_chain: list = None):
     """
     Generator yielding SSE-formatted sentence chunks.
     Format  : data: <sentence>\n\n
@@ -1785,12 +1863,12 @@ def _stream_groq(model_input: str, msg: str, model: str, system_prompt: str,
     # correct, but nothing in this function ever called it, so a Groq
     # outage or hitting the daily token cap meant every request failed
     # with the hardcoded error below regardless of what fallback was
-    # set up. Now it actually falls through to it.
-    if fallback_cfg:
-        print(f"[Stream] All Groq attempts failed, falling back to "
-              f"{fallback_cfg['provider']}/{fallback_cfg['model']}")
-        answer = call_provider(model_input, fallback_cfg["provider"],
-                               fallback_cfg["model"], system_prompt,
+    # set up. Now it actually falls through to it, and tries every
+    # provider in the chain, not just one, before finally giving up.
+    for fb in (fallback_chain or []):
+        print(f"[Stream] Trying fallback {fb['provider']}/{fb['model']}")
+        answer = call_provider(model_input, fb["provider"],
+                               fb["model"], system_prompt,
                                short_term, device_id)
         if answer:
             final, action_trigger = extract_action_trigger(answer)
@@ -1809,7 +1887,7 @@ def _stream_groq(model_input: str, msg: str, model: str, system_prompt: str,
                 yield f"data: [ACTION:{action_trigger}]\n\n"
             yield "data: [DONE]\n\n"
             return
-        print(f"[Stream] Fallback {fallback_cfg['provider']} also failed")
+        print(f"[Stream] Fallback {fb['provider']} also failed, trying next in chain")
 
     yield "data: [ERROR]I could not get a response. Please try again.\n\n"
     yield "data: [DONE]\n\n"
@@ -1886,6 +1964,33 @@ def _call_cohere(msg: str, system_prompt: str, short_term: list):
         print(f"[Cohere] {e}")
     return None
 
+def _call_cerebras(msg: str, model: str, system_prompt: str, short_term: list):
+    """Cerebras replaces Cohere in the fallback chains below — same
+    OpenAI-compatible chat completions shape as Mistral/OpenRouter,
+    just a different base URL, and known for very fast inference on
+    Llama models, which matters for a fallback path (the whole point
+    is not adding a second round of noticeable latency on top of the
+    primary call that already failed)."""
+    if not CEREBRAS_KEY:
+        return None
+    try:
+        messages = list(short_term)
+        messages[0] = {"role": "system", "content": system_prompt}
+        messages.append({"role": "user", "content": msg})
+        r = SESSION.post(
+            "https://api.cerebras.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {CEREBRAS_KEY}"},
+            json={"model": model, "messages": messages,
+                  "max_tokens": 1500, "temperature": 0.7},
+            timeout=18,
+        )
+        d = r.json()
+        if "choices" in d:
+            return d["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"[Cerebras] {e}")
+    return None
+
 def _call_mistral(msg: str, system_prompt: str, short_term: list):
     for key in MISTRAL_KEYS:
         if not key:
@@ -1919,6 +2024,8 @@ def call_provider(msg, provider, model, system_prompt, short_term, device_id):
         return _call_gemini(msg, model, system_prompt, short_term)
     if provider == "cohere":
         return _call_cohere(msg, system_prompt, short_term)
+    if provider == "cerebras":
+        return _call_cerebras(msg, model, system_prompt, short_term)
     if provider == "mistral":
         return _call_mistral(msg, system_prompt, short_term)
     return None
@@ -2455,9 +2562,11 @@ def process_multi_step(msg: str, device_id: str):
                                model_cfg["primary"]["model"], system_prompt,
                                short_term, device_id)
         if not answer:
-            answer = call_provider(step, model_cfg["fallback"]["provider"],
-                                   model_cfg["fallback"]["model"],
-                                   system_prompt, short_term, device_id)
+            for fb in model_cfg.get("fallbacks", []):
+                answer = call_provider(step, fb["provider"], fb["model"],
+                                       system_prompt, short_term, device_id)
+                if answer:
+                    break
 
         clean, action = extract_action_trigger(answer or "I couldn't complete that part.")
         clean = _clean_for_route(clean, route)
@@ -2536,10 +2645,12 @@ def process(msg: str, device_id: str):
                            model_cfg["primary"]["model"],
                            system_prompt, short_term, device_id)
     if not answer:
-        print("[Process] Primary failed, trying fallback")
-        answer = call_provider(msg, model_cfg["fallback"]["provider"],
-                               model_cfg["fallback"]["model"],
-                               system_prompt, short_term, device_id)
+        for fb in model_cfg.get("fallbacks", []):
+            print(f"[Process] Primary failed, trying fallback {fb['provider']}")
+            answer = call_provider(msg, fb["provider"], fb["model"],
+                                   system_prompt, short_term, device_id)
+            if answer:
+                break
     if not answer:
         for m in ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "mixtral-8x7b-32768"]:
             answer = _call_groq(msg, m, system_prompt, short_term)
@@ -2821,7 +2932,7 @@ def stream_response():
     if provider == "groq":
         gen = _stream_groq(model_input, msg, model, system_prompt,
                            short_term, device_id, route,
-                           fallback_cfg=model_cfg.get("fallback"))
+                           fallback_chain=model_cfg.get("fallbacks"))
     else:
         # non-Groq provider — no native token streaming, but still needs
         # the same search/read/action handling as everything else, or
@@ -2832,9 +2943,11 @@ def stream_response():
         answer = call_provider(model_input, provider, model, system_prompt,
                                short_term, device_id)
         if not answer:
-            answer = call_provider(model_input, model_cfg["fallback"]["provider"],
-                                   model_cfg["fallback"]["model"],
-                                   system_prompt, short_term, device_id)
+            for fb in model_cfg.get("fallbacks", []):
+                answer = call_provider(model_input, fb["provider"], fb["model"],
+                                       system_prompt, short_term, device_id)
+                if answer:
+                    break
         answer = answer or "I could not get a response right now."
 
         pre_search_clean, search_query = extract_search_trigger(answer)
@@ -3145,6 +3258,8 @@ def debug_keys():
                              "https://api.mistral.ai/v1/models"))
     results.append(check("Cohere Key", COHERE_KEY,
                          "https://api.cohere.com/v1/models"))
+    results.append(check("Cerebras Key", CEREBRAS_KEY,
+                         "https://api.cerebras.ai/v1/models"))
     results.append(check("OpenAI Key", OPENAI_KEY,
                          "https://api.openai.com/v1/models"))
     results.append(check("Gemini Key", GEMINI_KEY,
@@ -3503,6 +3618,7 @@ def health_internal():
         "openrouter_keys": sum(1 for k in OPENROUTER_KEYS if k),
         "mistral_keys": sum(1 for k in MISTRAL_KEYS if k),
         "gemini": bool(GEMINI_KEY), "cohere": bool(COHERE_KEY),
+        "cerebras": bool(CEREBRAS_KEY),
         "weather": bool(WEATHER_KEY), "news": bool(NEWS_KEY),
         "tts": bool(OPENAI_KEY),
         "brave_search": bool(BRAVE_SEARCH_KEY),  # legacy
