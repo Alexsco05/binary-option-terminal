@@ -122,7 +122,7 @@ MODELS = {
         "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
         "fallbacks": [
             {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
-            {"provider": "cerebras",   "model": "llama-3.3-70b"},
+            {"provider": "cerebras",   "model": "gpt-oss-120b"},
             {"provider": "mistral",    "model": "mistral-small-latest"},
         ],
     },
@@ -136,7 +136,7 @@ MODELS = {
         # periodically rather than assuming this stays valid forever.
         "fallbacks": [
             {"provider": "gemini",     "model": "gemini-3.5-flash"},
-            {"provider": "cerebras",   "model": "llama-3.3-70b"},
+            {"provider": "cerebras",   "model": "gpt-oss-120b"},
             {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
         ],
     },
@@ -151,7 +151,7 @@ MODELS = {
     "empathetic": {
         "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
         "fallbacks": [
-            {"provider": "cerebras",   "model": "llama-3.3-70b"},
+            {"provider": "cerebras",   "model": "gpt-oss-120b"},
             {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
             {"provider": "gemini",     "model": "gemini-3.5-flash"},
         ],
@@ -168,7 +168,7 @@ MODELS = {
         "primary": {"provider": "openrouter", "model": "qwen/qwen-2-math-72b-instruct:free"},
         "fallbacks": [
             {"provider": "groq",     "model": "llama-3.3-70b-versatile"},
-            {"provider": "cerebras", "model": "llama-3.3-70b"},
+            {"provider": "cerebras", "model": "gpt-oss-120b"},
             {"provider": "mistral",  "model": "mistral-small-latest"},
         ],
     },
@@ -176,7 +176,7 @@ MODELS = {
         "primary": {"provider": "openrouter", "model": "deepseek/deepseek-coder:free"},
         "fallbacks": [
             {"provider": "groq",     "model": "llama-3.3-70b-versatile"},
-            {"provider": "cerebras", "model": "llama-3.3-70b"},
+            {"provider": "cerebras", "model": "gpt-oss-120b"},
             {"provider": "mistral",  "model": "mistral-small-latest"},
         ],
     },
@@ -1894,6 +1894,9 @@ def _stream_groq(model_input: str, msg: str, model: str, system_prompt: str,
 
 
 def _call_openrouter(msg: str, model: str, system_prompt: str, short_term: list):
+    if not any(OPENROUTER_KEYS):
+        print("[OpenRouter] No OPENROUTER_KEY_1/2 set, skipping")
+        return None
     for key in OPENROUTER_KEYS:
         if not key:
             continue
@@ -1912,6 +1915,7 @@ def _call_openrouter(msg: str, model: str, system_prompt: str, short_term: list)
             d = r.json()
             if "choices" in d:
                 return d["choices"][0]["message"]["content"]
+            print(f"[OpenRouter {model}] No choices in response: {d}")
         except Exception as e:
             print(f"[OpenRouter {model}] {e}")
     return None
@@ -1972,6 +1976,7 @@ def _call_cerebras(msg: str, model: str, system_prompt: str, short_term: list):
     is not adding a second round of noticeable latency on top of the
     primary call that already failed)."""
     if not CEREBRAS_KEY:
+        print("[Cerebras] CEREBRAS_KEY not set, skipping")
         return None
     try:
         messages = list(short_term)
@@ -1987,6 +1992,7 @@ def _call_cerebras(msg: str, model: str, system_prompt: str, short_term: list):
         d = r.json()
         if "choices" in d:
             return d["choices"][0]["message"]["content"]
+        print(f"[Cerebras {model}] No choices in response: {d}")
     except Exception as e:
         print(f"[Cerebras] {e}")
     return None
@@ -2009,6 +2015,7 @@ def _call_mistral(msg: str, system_prompt: str, short_term: list):
             d = r.json()
             if "choices" in d:
                 return d["choices"][0]["message"]["content"]
+            print(f"[Mistral] No choices in response: {d}")
         except Exception as e:
             print(f"[Mistral] {e}")
     return None
@@ -2466,10 +2473,38 @@ def _clean_for_route(text: str, route: str) -> str:
     real $$ blocks for the WebView renderer and only strips stray inline
     $ wrapping, everything else gets full LaTeX-to-unicode conversion.
     /stream never applied either of these before, so voice replies with
-    formulas came through as raw LaTeX."""
+    formulas came through as raw LaTeX.
+
+    BUG FIXED: latex_to_unicode()'s cleanup regex strips ANY backslash
+    followed by letters, meant to catch leftover LaTeX commands like
+    \\alpha, but that's the exact same shape as \\n, \\t, \\d, \\w, \\s
+    in real code (newlines, tabs, regex patterns) and Windows paths
+    like C:\\Users\\name. Every code sample the model generated on any
+    non-math route was getting its escape sequences silently deleted.
+    The coding route now skips this entirely, and every other route
+    protects fenced code blocks before running the LaTeX cleanup, so a
+    code snippet inside a normal conversational answer doesn't get
+    mangled either — that happens often, not just on the coding route.
+    """
+    if route == "coding":
+        return text
+
+    # pull out fenced code blocks before any LaTeX/math cleanup touches
+    # the text, then put them back afterward completely untouched
+    code_blocks = []
+    def _stash(m):
+        code_blocks.append(m.group(0))
+        return f"\x00CODEBLOCK{len(code_blocks) - 1}\x00"
+    protected = re.sub(r'```.*?```', _stash, text, flags=re.DOTALL)
+
     if route == "math":
-        return strip_stray_inline_dollars(text)
-    return latex_to_unicode(text)
+        cleaned = strip_stray_inline_dollars(protected)
+    else:
+        cleaned = latex_to_unicode(protected)
+
+    for i, block in enumerate(code_blocks):
+        cleaned = cleaned.replace(f"\x00CODEBLOCK{i}\x00", block)
+    return cleaned
 
 
 def _looks_multi_part(msg: str) -> bool:
