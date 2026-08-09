@@ -391,22 +391,26 @@ def latex_to_unicode(text: str) -> str:
 
 def strip_stray_inline_dollars(text: str) -> str:
     """
-    Removes single-$ wrapping around inline variables/symbols (e.g. '$a$'
-    becomes 'a') while leaving real $$ ... $$ display blocks untouched,
-    since those are still needed by the Android WebView/MathJax renderer.
+    Leaves real $$ ... $$ display blocks and single-$ inline variables
+    ($a$, $x$) both untouched — the Android client now renders both
+    correctly (display blocks via the MathJax WebView, inline $x$ as
+    italicized text). This function used to also unwrap single-$ pairs
+    back to bare text, from back when the client only handled display
+    blocks; that stripping is gone now that inline math has somewhere
+    to go, but see below.
 
-    Also cleans up ORPHANED dollar markers — cases where the model wrote
-    a closing $$ for one formula and the next formula's closing $$ ends
-    up looking like its pair (e.g. a numbered list of formulas where
-    each one is missing its own opening $$). A naive $$...$$ regex would
-    incorrectly treat two unrelated orphaned markers as one valid block,
-    so a real pair is only accepted if its content doesn't cross a
-    numbered-list boundary or a paragraph break — those are the signals
-    that two markers belong to different, unrelated formulas.
-
-    Strategy: protect only CONFIRMED real $$ blocks, strip remaining
-    single $ pairs, remove any leftover unpaired $$ markers, then
-    restore the protected blocks.
+    What's still handled here: ORPHANED dollar markers — cases where
+    the model wrote a closing $$ for one formula and the next
+    formula's closing $$ ends up looking like its pair (e.g. a
+    numbered list of formulas where each one is missing its own
+    opening $$). A naive $$...$$ regex would incorrectly treat two
+    unrelated orphaned markers as one valid block, so a real pair is
+    only accepted if its content doesn't cross a numbered-list
+    boundary or a paragraph break — those are the signals that two
+    markers belong to different, unrelated formulas. Genuinely
+    unpaired $$ markers left over after that check are removed, since
+    a lone $$ with nothing to pair with can't render as anything
+    sensible on either side.
     """
     placeholders = []
 
@@ -432,10 +436,10 @@ def strip_stray_inline_dollars(text: str) -> str:
     protected = re.sub(r'\$\$(.*?)\$\$', _protect_checked, text, flags=re.DOTALL)
     protected = re.sub(r'\\\[.*?\\\]', _protect, protected, flags=re.DOTALL)
 
-    # strip remaining single-$ ... $ wrappers — just unwrap the content
-    protected = re.sub(r'\$([^\$\n]{1,80}?)\$', r'\1', protected)
-
-    # remove any leftover $$ markers that weren't part of a confirmed pair
+    # single-$ inline math ($a$, $x$) is left as-is now — the client
+    # renders it. Only genuinely leftover, unpaired $$ markers (never
+    # matched to a confirmed real pair above) get removed, since those
+    # can't render as anything on either side.
     protected = re.sub(r'\${2,}', '', protected)
 
     # restore protected display blocks
@@ -1362,10 +1366,16 @@ SPECIALIST_BLOCKS = {
         "4. Verify your answer by substituting back or using a second method.\n"
         "5. Explain what each step means in plain language after showing it.\n"
         "6. If the user seems to be learning, teach the concept, not just the answer.\n"
-        "Display equations in $$ ... $$ blocks. Always write both opening and closing $$. "
-        "Never leave a trailing $$ with no matching opening. "
-        "Never wrap single variables in dollar signs inside sentences ($a$, $b$, $x$ — wrong). "
-        "Write variables plainly in prose: 'a is the coefficient', not '$a$ is the coefficient'."
+        "Display standalone equations in $$ ... $$ blocks, each on their own "
+        "line with a blank line before and after — never inside a sentence. "
+        "Always write both opening and closing $$, never a trailing $$ with "
+        "no matching opening. "
+        "For a single variable or short expression mentioned inside a "
+        "sentence, wrap it in single dollar signs: 'where $a$ is the "
+        "coefficient' — this renders correctly and reads better than "
+        "spelling it out in plain words. Keep these inline expressions "
+        "short (a variable name, not a full equation) — a full equation "
+        "belongs in its own $$ block, not inline."
     ),
 
     "coding": (
@@ -1378,7 +1388,14 @@ SPECIALIST_BLOCKS = {
         "6. Explain what the code does and why.\n"
         "7. If there are edge cases or failure modes, mention them.\n"
         "Never produce code you have not mentally verified. "
-        "When debugging, find the root cause first — never patch symptoms."
+        "When debugging, find the root cause first — never patch symptoms.\n"
+        "Every code block starts with ``` followed immediately by the "
+        "language name (```python, ```kotlin), on its own line, and ends "
+        "with ``` alone on its own line. Keep the code's real line breaks "
+        "and indentation exactly as it would appear in an actual file — "
+        "never collapse a function onto one line to save space. Put a "
+        "blank line before the opening ``` and after the closing ```, "
+        "separating the block from surrounding prose."
     ),
 
     "writing": (
@@ -1596,6 +1613,17 @@ def build_system_prompt(personality: dict, route: str = "fast") -> str:
         f"Use ## headings and - bullets only in longer structured answers. "
         f"Use **word** for key terms. Use backtick blocks for code. "
         f"Short answers need no formatting — plain sentences are cleaner.\n\n"
+        f"Every heading, bullet list, numbered list, code block, and math "
+        f"block needs a real blank line before it and a real blank line "
+        f"after it — an actual empty line, not just the marker symbol. "
+        f"A heading followed directly by its paragraph with no blank line "
+        f"between them, or a bullet list packed onto the same line as the "
+        f"sentence introducing it, is wrong even if the ## or - symbol is "
+        f"there — the symbol alone does not create structure, the blank "
+        f"line does. When in doubt, put more blank lines in, not fewer. "
+        f"Never write two structural elements (a heading and a list, two "
+        f"bullets, a heading and a code block) back to back on the same "
+        f"line or paragraph.\n\n"
 
         # ── RULES ─────────────────────────────────────────────────
         f"RULES:\n"
@@ -3638,7 +3666,10 @@ def debug_knowledge_page():
 </body>
 </html>
     """
-    return Response(html, mimetype="text/html")
+    return Response(html, mimetype="text/html", headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+    })
 
 @app.route("/tts", methods=["POST"])
 def tts():
