@@ -106,6 +106,77 @@ def is_rate_limited(device_id: str) -> bool:
 # ================================================================
 # MODEL REGISTRY
 # ================================================================
+# ================================================================
+# PROVIDER LOAD TRACKING (Phase 9)
+# ----------------------------------------------------------------
+# Every route's primary has been Groq for a while now, on purpose —
+# every attempt at routing specific task types to specialized models
+# (dedicated math model, dedicated coding model) broke eventually,
+# deprecated or moved to paid-only. That history is real and this
+# doesn't undo it: routes still don't get reassigned by task type.
+#
+# What this DOES add: Groq hitting its daily token cap has already
+# happened once for real ("Groq's TPD limit tonight" — see the fast
+# route's own comment below). Right now every request goes to Groq
+# first regardless of how much it's already been used, and only
+# spreads to other providers once Groq is already failing. This
+# tracks rolling usage per provider and, when the configured primary
+# is nearing its soft cap, transparently promotes the first fallback
+# to take its place BEFORE the request goes out — proactive load
+# spreading, not reactive failover. The existing fallback chain on
+# actual failure is completely untouched.
+# ================================================================
+PROVIDER_USAGE        = defaultdict(list)   # provider -> [timestamps]
+_PROVIDER_USAGE_GUARD = threading.Lock()
+
+# Soft caps, deliberately conservative and meant to be tuned against
+# your real free-tier limits per provider. This is a SOFT cap: once a
+# provider crosses it within the rolling window it's deprioritized
+# (tried later), not blocked outright — a traffic burst shouldn't lock
+# a healthy provider out entirely.
+PROVIDER_SOFT_CAPS = {
+    "groq":       {"window_seconds": 86400, "max_requests": 800},
+    "cerebras":   {"window_seconds": 86400, "max_requests": 400},
+    "openrouter": {"window_seconds": 86400, "max_requests": 300},
+    "mistral":    {"window_seconds": 86400, "max_requests": 300},
+    "gemini":     {"window_seconds": 86400, "max_requests": 300},
+}
+
+def record_provider_usage(provider: str):
+    with _PROVIDER_USAGE_GUARD:
+        PROVIDER_USAGE[provider].append(time.time())
+
+def _provider_usage_count(provider: str, window_seconds: int) -> int:
+    now = time.time()
+    with _PROVIDER_USAGE_GUARD:
+        recent = [t for t in PROVIDER_USAGE[provider] if now - t < window_seconds]
+        PROVIDER_USAGE[provider] = recent  # prune while we're here
+        return len(recent)
+
+def provider_near_cap(provider: str) -> bool:
+    cap = PROVIDER_SOFT_CAPS.get(provider)
+    if not cap:
+        return False
+    return _provider_usage_count(provider, cap["window_seconds"]) >= cap["max_requests"]
+
+def select_primary(model_cfg: dict) -> dict:
+    """
+    Returns the provider/model to actually use as primary for this
+    call. Normally that's just model_cfg["primary"] — but if that
+    provider is near its soft cap, the first fallback is promoted in
+    its place instead, so load spreads across providers proactively
+    instead of hammering one until it fails. Falls back to the
+    original primary if every fallback is also near cap, since trying
+    the real primary anyway beats refusing the request outright.
+    """
+    primary = model_cfg["primary"]
+    if provider_near_cap(primary["provider"]):
+        for fb in (model_cfg.get("fallbacks") or []):
+            if not provider_near_cap(fb["provider"]):
+                print(f"[Load] {primary['provider']} near soft cap, using {fb['provider']} instead")
+                return fb
+    return primary
+
 MODELS = {
     # llama-3.3-70b-versatile is the primary workhorse — higher free tier
     # TPM limit than openai/gpt-oss-20b (which caps at 8k TPM and also
@@ -1751,6 +1822,7 @@ def _stream_groq(model_input: str, msg: str, model: str, system_prompt: str,
         if not key:
             continue
         try:
+            record_provider_usage("groq")
             r = requests.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
@@ -1771,43 +1843,67 @@ def _stream_groq(model_input: str, msg: str, model: str, system_prompt: str,
             full_text  = ""
             SENT_CHARS = {".", "!", "?"}
 
-            for raw_line in r.iter_lines():
-                if not raw_line:
-                    continue
-                line = raw_line.decode("utf-8", errors="ignore")
-                if not line.startswith("data: "):
-                    continue
-                payload = line[6:]
-                if payload.strip() == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(payload)
-                    token = chunk["choices"][0].get("delta", {}).get("content", "")
-                    if not token:
+            # The memory-save logic below the loop only runs if the loop
+            # finishes normally. If the Android client disconnects
+            # mid-stream — which is exactly what happens on a barge-in,
+            # since StreamingLLMClient.cancel() just closes the
+            # connection — the next yield raises GeneratorExit right
+            # here, the generator dies at that point, and everything
+            # after the loop (including saving to memory) never runs.
+            # That meant an interrupted exchange was silently never
+            # remembered, on top of whatever partial reply the user did
+            # hear. Catching GeneratorExit here saves what was generated
+            # so far before letting the disconnect propagate.
+            try:
+                for raw_line in r.iter_lines():
+                    if not raw_line:
                         continue
-                    buffer    += token
-                    full_text += token
-
-                    # yield at sentence boundary or when buffer is large enough
-                    if any(c in buffer for c in SENT_CHARS) or len(buffer) > 180:
-                        split_at = max(
-                            buffer.rfind(". "),
-                            buffer.rfind("! "),
-                            buffer.rfind("? "),
-                            buffer.rfind(".\n"),
-                        )
-                        if split_at > 0:
-                            sentence = buffer[:split_at + 1].strip()
-                            buffer   = buffer[split_at + 1:].strip()
-                        elif len(buffer) > 250:
-                            sentence = buffer.strip()
-                            buffer   = ""
-                        else:
+                    line = raw_line.decode("utf-8", errors="ignore")
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:]
+                    if payload.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                        token = chunk["choices"][0].get("delta", {}).get("content", "")
+                        if not token:
                             continue
-                        if sentence:
-                            yield f"data: {_clean_for_route(sentence, route)}\n\n"
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
+                        buffer    += token
+                        full_text += token
+
+                        # yield at sentence boundary or when buffer is large enough
+                        if any(c in buffer for c in SENT_CHARS) or len(buffer) > 180:
+                            split_at = max(
+                                buffer.rfind(". "),
+                                buffer.rfind("! "),
+                                buffer.rfind("? "),
+                                buffer.rfind(".\n"),
+                            )
+                            if split_at > 0:
+                                sentence = buffer[:split_at + 1].strip()
+                                buffer   = buffer[split_at + 1:].strip()
+                            elif len(buffer) > 250:
+                                sentence = buffer.strip()
+                                buffer   = ""
+                            else:
+                                continue
+                            if sentence:
+                                yield f"data: {_clean_for_route(sentence, route)}\n\n"
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
+            except GeneratorExit:
+                if full_text.strip():
+                    try:
+                        partial = _clean_for_route(full_text.strip(), route)
+                        short_term.append({"role": "user", "content": msg})
+                        short_term.append({"role": "assistant", "content": partial})
+                        trim_short_term(short_term)
+                        EXECUTOR.submit(update_long_term, msg, partial, device_id)
+                        print(f"[Stream] Barge-in — saved partial reply ({len(partial)} chars)")
+                    except Exception as e:
+                        print(f"[Stream] partial-save on interrupt failed: {e}")
+                raise
 
             # ── TAG RESOLUTION ──────────────────────────────────────
             # Everything above was already sent to the client in real
@@ -2079,6 +2175,7 @@ def _call_mistral(msg: str, system_prompt: str, short_term: list):
 def call_provider(msg, provider, model, system_prompt, short_term, device_id):
     """All providers now receive short_term memory — fixes the
     inconsistency where only Groq had context."""
+    record_provider_usage(provider)
     if provider == "groq":
         return _call_groq(msg, model, system_prompt, short_term)
     if provider == "openrouter":
@@ -2648,9 +2745,10 @@ def process_multi_step(msg: str, device_id: str):
         route         = route_model(step, personality)
         system_prompt = build_system_prompt(personality, route)
         model_cfg     = MODELS.get(route, MODELS["fast"])
+        primary       = select_primary(model_cfg)
 
-        answer = call_provider(step, model_cfg["primary"]["provider"],
-                               model_cfg["primary"]["model"], system_prompt,
+        answer = call_provider(step, primary["provider"],
+                               primary["model"], system_prompt,
                                short_term, device_id)
         if not answer:
             for fb in model_cfg.get("fallbacks", []):
@@ -2732,8 +2830,9 @@ def process(msg: str, device_id: str):
                 return clean, trigger
 
     model_cfg = MODELS.get(route, MODELS["fast"])
-    answer = call_provider(msg, model_cfg["primary"]["provider"],
-                           model_cfg["primary"]["model"],
+    primary   = select_primary(model_cfg)
+    answer = call_provider(msg, primary["provider"],
+                           primary["model"],
                            system_prompt, short_term, device_id)
     if not answer:
         for fb in model_cfg.get("fallbacks", []):
@@ -2771,8 +2870,8 @@ def process(msg: str, device_id: str):
                 f"results — just answer as yourself."
             )
             followup = call_provider(
-                followup_prompt, model_cfg["primary"]["provider"],
-                model_cfg["primary"]["model"], system_prompt, short_term, device_id
+                followup_prompt, primary["provider"],
+                primary["model"], system_prompt, short_term, device_id
             )
             if followup:
                 answer = followup
@@ -2799,7 +2898,7 @@ def process(msg: str, device_id: str):
         if page_content:
             followup = call_provider(
                 f"User asked: {msg}\n\nYou read: {read_url}\nContent:\n{page_content}\n\nAnswer naturally.",
-                model_cfg["primary"]["provider"], model_cfg["primary"]["model"],
+                primary["provider"], primary["model"],
                 system_prompt, short_term, device_id
             )
             answer = followup or pre_read_clean or "I could not read that page."
@@ -3000,8 +3099,9 @@ def stream_response():
     route        = route_model(msg, personality)
     system_prompt = build_system_prompt(personality, route)
     model_cfg    = MODELS.get(route, MODELS["fast"])
-    model        = model_cfg["primary"]["model"]
-    provider     = model_cfg["primary"]["provider"]
+    primary      = select_primary(model_cfg)
+    model        = primary["model"]
+    provider     = primary["provider"]
 
     # weather/news get the same direct-API treatment /run already uses,
     # instead of relying on the model to request a search for them.
@@ -3366,6 +3466,23 @@ def debug_keys():
                  "completions do.")
     })
 
+@app.route("/debug/provider-usage", methods=["GET"])
+def debug_provider_usage():
+    """Shows current rolling usage per provider against its soft cap —
+    the easiest way to confirm Phase 9's load spreading is actually
+    doing anything, and to tune PROVIDER_SOFT_CAPS against your real
+    limits once you've seen real traffic patterns."""
+    result = {}
+    for provider, cap in PROVIDER_SOFT_CAPS.items():
+        count = _provider_usage_count(provider, cap["window_seconds"])
+        result[provider] = {
+            "used":        count,
+            "cap":         cap["max_requests"],
+            "near_cap":    count >= cap["max_requests"],
+            "window_hours": cap["window_seconds"] // 3600,
+        }
+    return jsonify(result)
+
 @app.route("/debug/devices", methods=["GET"])
 def debug_devices():
     """
@@ -3726,4 +3843,4 @@ def health_internal():
 if __name__ == "__main__":
     print(f"{BOT_NAME} v11.0 online")
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port)
