@@ -583,58 +583,22 @@ def extract_search_trigger(reply: str):
         return clean, query[:200]  # cap query length defensively
     return reply, None
 
-def web_search(query: str) -> str:
-    """
-    Calls Serper.dev Google Search API and returns a short plain-text
-    summary of the top results, or '' on any failure.
-    Serper response: { "organic": [ { "title", "snippet", "link" }, ... ] }
-    Free tier: 2500 queries/month, no credit card required.
-    """
-    if not SERPER_KEY:
-        print("[Search] SERPER_KEY not configured")
-        return ""
-    try:
-        r = requests.post(
-            "https://google.serper.dev/search",
-            headers={
-                "X-API-KEY":    SERPER_KEY,
-                "Content-Type": "application/json",
-            },
-            json={"q": query, "num": 5},
-            timeout=10,
-        )
-        if r.status_code != 200:
-            print(f"[Search] Serper returned {r.status_code}: {r.text[:200]}")
-            return ""
-
-        data    = r.json()
-        results = data.get("organic", [])[:5]
-        if not results:
-            return ""
-
-        lines = []
-        for item in results:
-            title   = item.get("title",   "").strip()
-            snippet = item.get("snippet", "").strip()
-            snippet = re.sub(r'<[^>]+>', '', snippet)   # strip any stray HTML
-            if title and snippet:
-                lines.append(f"- {title}: {snippet}")
-
-        # include answerBox if Serper returned one (e.g. weather, sports, quick facts)
-        answer_box = data.get("answerBox", {})
-        if answer_box:
-            answer = (
-                answer_box.get("answer") or
-                answer_box.get("snippet") or
-                answer_box.get("snippetHighlighted", [""])[0]
-            )
-            if answer:
-                lines.insert(0, f"Direct answer: {answer}")
-
-        return "\n".join(lines[:6])
-    except Exception as e:
-        print(f"[Search] exception: {e}")
-        return ""
+# ================================================================
+# WEB SEARCH — model-triggered, same pattern as [ACTION:...]
+# ----------------------------------------------------------------
+# The model can emit [SEARCH:query] when it judges a question needs
+# current information it wouldn't reliably know (news, prices, recent
+# events, "is X still true today" type questions). The server detects
+# this tag the same way it detects [ACTION:...], runs ONE search, and
+# feeds the results back to the model for a final answer. This keeps
+# search opt-in per-message rather than running on every request.
+#
+# web_search() itself moved to integrations/web.py — see there.
+# ================================================================
+from integrations.web import (
+    web_search, web_search_with_links, firecrawl_read,
+    get_weather, extract_city_from_weather_query, get_news,
+)
 
 # ================================================================
 # FIRECRAWL — FULL PAGE READER
@@ -650,63 +614,8 @@ def extract_read_trigger(reply: str):
         return clean, url
     return reply, None
 
-def firecrawl_read(url: str) -> str:
-    if not FIRECRAWL_KEY:
-        print("[Firecrawl] FIRECRAWL_KEY not configured")
-        return ""
-    try:
-        r = requests.post(
-            "https://api.firecrawl.dev/v1/scrape",
-            headers={
-                "Authorization": f"Bearer {FIRECRAWL_KEY}",
-                "Content-Type":  "application/json",
-            },
-            json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
-            timeout=20,
-        )
-        if r.status_code != 200:
-            print(f"[Firecrawl] HTTP {r.status_code}")
-            return ""
-        return r.json().get("data", {}).get("markdown", "")[:4000].strip()
-    except Exception as e:
-        print(f"[Firecrawl] error: {e}")
-        return ""
-
-# ================================================================
-# RESEARCH MODE (Phase 6) — wires search + read + extraction into
-# one pipeline, rather than new capability of its own.
-# ================================================================
-def web_search_with_links(query: str, num: int = 5) -> list:
-    """
-    Like web_search(), but returns structured results with URLs intact
-    instead of a display-formatted string. web_search()'s output drops
-    links entirely since it's built for showing snippets in a reply —
-    Research Mode needs the actual URLs to hand to firecrawl_read().
-    Returns [] on any failure.
-    """
-    if not SERPER_KEY:
-        return []
-    try:
-        r = requests.post(
-            "https://google.serper.dev/search",
-            headers={"X-API-KEY": SERPER_KEY, "Content-Type": "application/json"},
-            json={"q": query, "num": num},
-            timeout=10,
-        )
-        if r.status_code != 200:
-            return []
-        results = r.json().get("organic", [])[:num]
-        return [
-            {
-                "title":   item.get("title", "").strip(),
-                "snippet": re.sub(r'<[^>]+>', '', item.get("snippet", "").strip()),
-                "url":     item.get("link", "").strip(),
-            }
-            for item in results if item.get("link")
-        ]
-    except Exception as e:
-        print(f"[Research] search exception: {e}")
-        return []
+# firecrawl_read() and web_search_with_links() moved to
+# integrations/web.py — imported in the block above.
 
 def run_research(topic: str, device_id: str, max_pages: int = 3) -> dict:
     """
@@ -1809,25 +1718,19 @@ def call_provider(msg, provider, model, system_prompt, short_term, device_id):
 # fallback. Same /tts contract as before (base64 in JSON), so the
 # Android side needs zero changes.
 # ================================================================
+# ================================================================
+# TTS — raw generators (Edge TTS primary, OpenAI fallback) moved to
+# integrations/tts.py. generate_tts_base64() and _clean_for_speech()
+# stay here — they depend on convert_math_for_speech() and
+# extract_action_trigger(), core/skill logic not yet modularized.
+# ================================================================
 import asyncio
 import uuid as _uuid
 
-VALID_OPENAI_VOICES = {
-    "alloy", "ash", "ballad", "coral", "echo",
-    "fable", "onyx", "nova", "sage", "shimmer",
-}
-
-# Edge TTS voice names — pick whichever sounds best for Gideon.
-# Full list: run `edge-tts --list-voices` once locally if you want options.
-EDGE_VOICE_MAP = {
-    "onyx":    "en-US-GuyNeural",      # closest match: calm male voice
-    "echo":    "en-US-ChristopherNeural",
-    "alloy":   "en-US-EricNeural",
-    "fable":   "en-GB-RyanNeural",
-    "nova":    "en-US-AriaNeural",     # female option
-    "shimmer": "en-US-JennyNeural",    # female option
-    "default": "en-US-GuyNeural",
-}
+from integrations.tts import (
+    VALID_OPENAI_VOICES, EDGE_VOICE_MAP,
+    _generate_edge_tts, _generate_openai_tts,
+)
 
 # ================================================================
 # MATH-TO-SPEECH CONVERSION
@@ -1983,78 +1886,8 @@ def _clean_for_speech(text: str) -> str:
     clean = re.sub(r'\s+', ' ', clean).strip()
     return clean[:900]
 
-def _generate_edge_tts(text: str, voice_key: str) -> tuple:
-    """Returns (audio_base64, error_message). Free, no API key, no quota.
-    Each call uses a unique temp file so concurrent requests from
-    different users never collide or overwrite each other."""
-    try:
-        import edge_tts
-    except ImportError:
-        return "", "edge-tts package not installed on server"
-
-    edge_voice = EDGE_VOICE_MAP.get(voice_key, EDGE_VOICE_MAP["default"])
-    temp_path  = f"/tmp/gideon_tts_{_uuid.uuid4().hex}.mp3"
-
-    try:
-        async def _run():
-            communicate = edge_tts.Communicate(text, edge_voice)
-            await communicate.save(temp_path)
-
-        # safe to call from a plain Flask request handler — creates
-        # its own event loop rather than assuming one already exists
-        loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(_run())
-        finally:
-            loop.close()
-
-        with open(temp_path, "rb") as f:
-            audio_bytes = f.read()
-
-        if not audio_bytes:
-            return "", "Edge TTS produced an empty file"
-
-        return base64.b64encode(audio_bytes).decode("utf-8"), ""
-    except Exception as e:
-        print(f"[TTS][Edge] exception: {e}")
-        return "", f"Edge TTS error: {e}"
-    finally:
-        try:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-        except Exception:
-            pass
-
-def _generate_openai_tts(text: str, voice: str) -> tuple:
-    """Returns (audio_base64, error_message). Used only as an optional
-    fallback if OPENAI_API_KEY is set and billing is active."""
-    if not OPENAI_KEY:
-        return "", "OPENAI_API_KEY not configured"
-
-    if voice not in VALID_OPENAI_VOICES:
-        voice = "onyx"
-
-    try:
-        r = SESSION.post(
-            "https://api.openai.com/v1/audio/speech",
-            headers={"Authorization": f"Bearer {OPENAI_KEY}"},
-            json={
-                "model": "tts-1", "voice": voice, "input": text,
-                "response_format": "mp3", "speed": 1.0,
-            },
-            timeout=20,
-        )
-        print(f"[TTS][OpenAI] response status: {r.status_code}")
-        if r.status_code == 200:
-            return base64.b64encode(r.content).decode("utf-8"), ""
-        else:
-            body_preview = r.text[:300]
-            print(f"[TTS][OpenAI] error body: {body_preview}")
-            return "", f"OpenAI TTS returned {r.status_code}: {body_preview}"
-    except Exception as e:
-        print(f"[TTS][OpenAI] exception: {e}")
-        return "", str(e)
+# _generate_edge_tts() and _generate_openai_tts() moved to
+# integrations/tts.py — imported above.
 
 def generate_tts_base64(text: str, voice: str = "onyx") -> tuple:
     """
@@ -2082,60 +1915,9 @@ def generate_tts_base64(text: str, voice: str = "onyx") -> tuple:
     return "", f"Both TTS providers failed. Edge: {error} | OpenAI: {error2}"
 
 # ================================================================
-# WEATHER & NEWS
+# WEATHER & NEWS — moved to integrations/web.py, imported near the
+# top of this file alongside web_search/firecrawl_read.
 # ================================================================
-def get_weather(city: str = "") -> str:
-    if not WEATHER_KEY:
-        return ""
-    try:
-        r = SESSION.get(
-            "https://api.openweathermap.org/data/2.5/weather",
-            params={"q": city or "Lagos", "appid": WEATHER_KEY, "units": "metric"},
-            timeout=5,
-        )
-        d = r.json()
-        if d.get("cod") == 200:
-            return (f"Weather in {d['name']}: {d['weather'][0]['description']}, "
-                    f"{d['main']['temp']}°C, feels like {d['main']['feels_like']}°C, "
-                    f"humidity {d['main']['humidity']}%.")
-    except Exception as e:
-        print(f"[Weather] {e}")
-    return ""
-
-def extract_city_from_weather_query(msg: str) -> str:
-    """
-    Fixes the bug where 'weather in New York tomorrow?' produced
-    'New York tomorrow?' as the city. Strips trailing time words
-    and punctuation.
-    """
-    ml = msg.lower()
-    idx = ml.find(" in ")
-    if idx < 0:
-        return ""
-    city = msg[idx + 4:].strip()
-    # strip common trailing time/question words
-    city = re.sub(
-        r'\b(today|tomorrow|tonight|this week|right now|now)\b',
-        '', city, flags=re.IGNORECASE
-    ).strip()
-    city = city.rstrip("?!.,").strip()
-    return city[:50]
-
-def get_news() -> str:
-    if not NEWS_KEY:
-        return ""
-    try:
-        r = SESSION.get(
-            "https://newsapi.org/v2/top-headlines",
-            params={"apiKey": NEWS_KEY, "country": "ng", "pageSize": 3},
-            timeout=5,
-        )
-        arts = r.json().get("articles", [])
-        hl = [a["title"] for a in arts[:3] if a.get("title")]
-        return "Latest news: " + ". ".join(hl) if hl else ""
-    except Exception as e:
-        print(f"[News] {e}")
-    return ""
 
 # ================================================================
 # MAIN PROCESS
