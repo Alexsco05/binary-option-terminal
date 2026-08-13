@@ -2,6 +2,8 @@
 # GIDEON BACKEND - Version 11.0
 # Creator: Alexsco (Adegolu Alex) @alexsco_official
 # Pre-launch hardened build - July 1, 2026
+# Modularization step 1: config extracted to config/environment.py
+# and config/settings.py — everything else in this file is UNCHANGED.
 # ================================================================
 
 from flask import Flask, request, jsonify, Response, stream_with_context
@@ -14,42 +16,26 @@ import requests
 from storage import read_json, write_json, delete_json, safe_device_id
 from ttl_cache import TTLCache
 
+from config.environment import (
+    BOT_NAME, GROQ_KEYS, OPENROUTER_KEYS, MISTRAL_KEYS,
+    GEMINI_KEY, COHERE_KEY, CEREBRAS_KEY, WEATHER_KEY, NEWS_KEY,
+    OPENAI_KEY, BRAVE_SEARCH_KEY, SERPER_KEY, FIRECRAWL_KEY,
+    DEVICE_SECRET, PORT,
+)
+from config.settings import (
+    RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_HOUR, MEMORY_LIMIT,
+    CACHE_MAXSIZE, CACHE_TTL_SECONDS, EXECUTOR_MAX_WORKERS,
+    PROVIDER_SOFT_CAPS, MODELS,
+)
+
 app = Flask(__name__)
-
-# ================================================================
-# CONFIG
-# ================================================================
-BOT_NAME = "Gideon"
-
-GROQ_KEYS = [
-    os.getenv("GROQ_KEY_1", ""),
-    os.getenv("GROQ_KEY_2", ""),
-]
-OPENROUTER_KEYS = [
-    os.getenv("OPENROUTER_KEY_1", ""),
-    os.getenv("OPENROUTER_KEY_2", ""),
-]
-MISTRAL_KEYS = [
-    os.getenv("MISTRAL_KEY_1", ""),
-    os.getenv("MISTRAL_KEY_2", ""),
-]
-GEMINI_KEY    = os.getenv("GEMINI_KEY", "")
-COHERE_KEY    = os.getenv("COHERE_KEY", "")
-CEREBRAS_KEY  = os.getenv("CEREBRAS_KEY", "")
-WEATHER_KEY   = os.getenv("WEATHER_KEY", "")
-NEWS_KEY      = os.getenv("NEWS_KEY", "")
-OPENAI_KEY    = os.getenv("OPENAI_API_KEY", "")
-BRAVE_SEARCH_KEY = os.getenv("BRAVE_SEARCH_KEY", "")  # kept for backwards compat
-SERPER_KEY       = os.getenv("SERPER_KEY", "")
-FIRECRAWL_KEY    = os.getenv("FIRECRAWL_KEY", "")
-DEVICE_SECRET = os.getenv("DEVICE_SECRET", "gideon-dev-secret-change-in-railway")
 
 # ── shared HTTP session — reuses connections, cuts latency ────────
 SESSION = requests.Session()
 SESSION.headers.update({"Content-Type": "application/json"})
 
 # ── background work pool — replaces unbounded thread spawning ─────
-EXECUTOR = ThreadPoolExecutor(max_workers=8)
+EXECUTOR = ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
 
 # ================================================================
 # DEVICE TOKEN (lightweight alternative to full JWT/Firebase auth)
@@ -76,8 +62,6 @@ def verify_device_token(device_id: str, token: str) -> bool:
 # RATE LIMITING — with expiry-based pruning (fixes memory leak)
 # ================================================================
 REQUEST_COUNTS = defaultdict(list)
-RATE_LIMIT_PER_MINUTE = 20
-RATE_LIMIT_PER_HOUR   = 200
 _last_global_prune     = time.time()
 
 def is_rate_limited(device_id: str) -> bool:
@@ -104,9 +88,6 @@ def is_rate_limited(device_id: str) -> bool:
     return False
 
 # ================================================================
-# MODEL REGISTRY
-# ================================================================
-# ================================================================
 # PROVIDER LOAD TRACKING (Phase 9)
 # ----------------------------------------------------------------
 # Every route's primary has been Groq for a while now, on purpose —
@@ -125,22 +106,12 @@ def is_rate_limited(device_id: str) -> bool:
 # to take its place BEFORE the request goes out — proactive load
 # spreading, not reactive failover. The existing fallback chain on
 # actual failure is completely untouched.
+#
+# PROVIDER_SOFT_CAPS and MODELS now live in config/settings.py —
+# see there for the actual cap numbers and model registry.
 # ================================================================
 PROVIDER_USAGE        = defaultdict(list)   # provider -> [timestamps]
 _PROVIDER_USAGE_GUARD = threading.Lock()
-
-# Soft caps, deliberately conservative and meant to be tuned against
-# your real free-tier limits per provider. This is a SOFT cap: once a
-# provider crosses it within the rolling window it's deprioritized
-# (tried later), not blocked outright — a traffic burst shouldn't lock
-# a healthy provider out entirely.
-PROVIDER_SOFT_CAPS = {
-    "groq":       {"window_seconds": 86400, "max_requests": 800},
-    "cerebras":   {"window_seconds": 86400, "max_requests": 400},
-    "openrouter": {"window_seconds": 86400, "max_requests": 300},
-    "mistral":    {"window_seconds": 86400, "max_requests": 300},
-    "gemini":     {"window_seconds": 86400, "max_requests": 300},
-}
 
 def record_provider_usage(provider: str):
     with _PROVIDER_USAGE_GUARD:
@@ -176,107 +147,6 @@ def select_primary(model_cfg: dict) -> dict:
                 print(f"[Load] {primary['provider']} near soft cap, using {fb['provider']} instead")
                 return fb
     return primary
-
-MODELS = {
-    # llama-3.3-70b-versatile is the primary workhorse — higher free tier
-    # TPM limit than openai/gpt-oss-20b (which caps at 8k TPM and also
-    # interprets [SEARCH:...] tags as native tool calls, breaking the
-    # tag-based search system). 70b handles all route types well.
-    #
-    # "fallbacks" is a LIST now, tried in order, not a single dict.
-    # Deliberately diversified across providers rather than just
-    # models, a single provider hitting its own cap (Groq's TPD limit
-    # tonight is the exact real-world case) shouldn't be able to take
-    # an entire chain down with it. Cohere has been replaced with
-    # Cerebras throughout — same role, different provider.
-    "fast": {
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-        "fallbacks": [
-            {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
-            {"provider": "cerebras",   "model": "gpt-oss-120b"},
-            {"provider": "mistral",    "model": "mistral-small-latest"},
-        ],
-    },
-    "complex": {
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-        # gemini-1.5-flash was fully shut down by Google — this was
-        # silently 404ing on every fallback. gemini-3.5-flash is
-        # current GA with no shutdown date announced as of this
-        # writing, but Google's retirement cadence is fast; check
-        # https://ai.google.dev/gemini-api/docs/deprecations
-        # periodically rather than assuming this stays valid forever.
-        "fallbacks": [
-            {"provider": "gemini",     "model": "gemini-3.5-flash"},
-            {"provider": "cerebras",   "model": "gpt-oss-120b"},
-            {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
-        ],
-    },
-    "creative": {
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-        "fallbacks": [
-            {"provider": "mistral",    "model": "mistral-small-latest"},
-            {"provider": "openrouter", "model": "mistralai/mistral-7b-instruct:free"},
-            {"provider": "gemini",     "model": "gemini-3.5-flash"},
-        ],
-    },
-    "empathetic": {
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-        "fallbacks": [
-            {"provider": "cerebras",   "model": "gpt-oss-120b"},
-            {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
-            {"provider": "gemini",     "model": "gemini-3.5-flash"},
-        ],
-    },
-    "firm": {
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-        "fallbacks": [
-            {"provider": "openrouter", "model": "mistralai/mistral-7b-instruct:free"},
-            {"provider": "mistral",    "model": "mistral-small-latest"},
-            {"provider": "gemini",     "model": "gemini-3.5-flash"},
-        ],
-    },
-    "math": {
-        # was openrouter primary with a dedicated free math model —
-        # unverifiable given how fast that catalog rotates, and math
-        # was failing outright whenever it went stale. Groq's general
-        # model handles math well enough to be the safer primary.
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-        "fallbacks": [
-            {"provider": "openrouter", "model": "qwen/qwen3-coder:free"},
-            {"provider": "cerebras",   "model": "gpt-oss-120b"},
-            {"provider": "mistral",    "model": "mistral-small-latest"},
-        ],
-    },
-    "coding": {
-        # was openrouter primary with deepseek/deepseek-coder:free —
-        # confirmed permanently moved to paid-only, not a temporary
-        # outage. Same reasoning as math: Groq primary, OpenRouter
-        # (now with its own internal multi-model fallback) demoted to
-        # a fallback slot instead of gating the whole route.
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-        "fallbacks": [
-            {"provider": "openrouter", "model": "qwen/qwen3-coder:free"},
-            {"provider": "cerebras",   "model": "gpt-oss-120b"},
-            {"provider": "mistral",    "model": "mistral-small-latest"},
-        ],
-    },
-    "weather": {
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-        "fallbacks": [
-            {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
-            {"provider": "mistral",    "model": "mistral-small-latest"},
-            {"provider": "gemini",     "model": "gemini-3.5-flash"},
-        ],
-    },
-    "news": {
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-        "fallbacks": [
-            {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
-            {"provider": "mistral",    "model": "mistral-small-latest"},
-            {"provider": "gemini",     "model": "gemini-3.5-flash"},
-        ],
-    },
-}
 
 # ================================================================
 # ACTION WHITELIST
@@ -403,12 +273,11 @@ def sanitize_action(action):
 # ================================================================
 # IN-MEMORY STORES (per-process; safe for single Railway worker)
 # ================================================================
-CACHE                 = TTLCache(maxsize=2000, ttl=1800)   # 30 min, size-capped
+CACHE                 = TTLCache(maxsize=CACHE_MAXSIZE, ttl=CACHE_TTL_SECONDS)
 USER_SHORT_TERM       = {}
 PENDING_CONFIRMATIONS = {}
 KNOWLEDGE_STORE        = {}  # device_id -> {node_id: {label, category, related_to}}
 _KNOWLEDGE_GUARD        = threading.Lock()
-MEMORY_LIMIT          = 20
 
 def get_short_term(device_id: str):
     if device_id not in USER_SHORT_TERM:
@@ -3842,5 +3711,4 @@ def health_internal():
 
 if __name__ == "__main__":
     print(f"{BOT_NAME} v11.0 online")
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=PORT)
