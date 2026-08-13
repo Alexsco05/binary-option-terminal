@@ -7,7 +7,7 @@
 # ================================================================
 
 from flask import Flask, request, jsonify, Response, stream_with_context
-import os, re, time, base64, hmac, hashlib, json, datetime, threading
+import os, re, time, base64, json, datetime, threading
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 
@@ -23,9 +23,8 @@ from config.environment import (
     DEVICE_SECRET, PORT,
 )
 from config.settings import (
-    RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_HOUR, MEMORY_LIMIT,
-    CACHE_MAXSIZE, CACHE_TTL_SECONDS, EXECUTOR_MAX_WORKERS,
-    PROVIDER_SOFT_CAPS, MODELS,
+    MEMORY_LIMIT, CACHE_MAXSIZE, CACHE_TTL_SECONDS,
+    EXECUTOR_MAX_WORKERS, PROVIDER_SOFT_CAPS, MODELS,
 )
 
 app = Flask(__name__)
@@ -38,54 +37,11 @@ SESSION.headers.update({"Content-Type": "application/json"})
 EXECUTOR = ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
 
 # ================================================================
-# DEVICE TOKEN (lightweight alternative to full JWT/Firebase auth)
-# ----------------------------------------------------------------
-# Not full authentication. Raises the bar from "anyone who guesses
-# a string" to "anyone who has the signed token", which the
-# Android app generates once per device_id and reuses. True auth
-# (Firebase/Supabase) is the v1.1 follow-up; this is the launch-week
-# mitigation for the device_id spoofing gap.
+# DEVICE TOKEN + RATE LIMITING — moved to services/authentication.py
+# and services/rate_limit.py. See those files for the actual logic.
 # ================================================================
-def make_device_token(device_id: str) -> str:
-    sig = hmac.new(
-        DEVICE_SECRET.encode(), device_id.encode(), hashlib.sha256
-    ).hexdigest()[:24]
-    return f"{device_id}.{sig}"
-
-def verify_device_token(device_id: str, token: str) -> bool:
-    if not token:
-        return False
-    expected = make_device_token(device_id)
-    return hmac.compare_digest(expected, token)
-
-# ================================================================
-# RATE LIMITING — with expiry-based pruning (fixes memory leak)
-# ================================================================
-REQUEST_COUNTS = defaultdict(list)
-_last_global_prune     = time.time()
-
-def is_rate_limited(device_id: str) -> bool:
-    global _last_global_prune
-    now = time.time()
-
-    # lazy global prune every ~5 minutes so the dict never grows forever
-    if now - _last_global_prune > 300:
-        stale = [
-            k for k, v in REQUEST_COUNTS.items()
-            if not v or now - v[-1] > 3600
-        ]
-        for k in stale:
-            del REQUEST_COUNTS[k]
-        _last_global_prune = now
-
-    counts = [t for t in REQUEST_COUNTS[device_id] if t > now - 3600]
-    REQUEST_COUNTS[device_id] = counts
-    if sum(1 for t in counts if t > now - 60) >= RATE_LIMIT_PER_MINUTE:
-        return True
-    if len(counts) >= RATE_LIMIT_PER_HOUR:
-        return True
-    REQUEST_COUNTS[device_id].append(now)
-    return False
+from services.authentication import make_device_token, verify_device_token
+from services.rate_limit import is_rate_limited
 
 # ================================================================
 # PROVIDER LOAD TRACKING (Phase 9)
