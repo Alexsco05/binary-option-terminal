@@ -18,6 +18,11 @@ import time
 import threading
 from collections import defaultdict
 
+from integrations.providers import (
+    _call_groq, _call_openrouter, _call_gemini,
+    _call_cohere, _call_cerebras, _call_mistral,
+)
+
 from config.settings import PROVIDER_SOFT_CAPS
 
 
@@ -206,3 +211,28 @@ MOOD_BEHAVIOR = {
 
 def get_mood_behavior(mood: str) -> str:
     return MOOD_BEHAVIOR.get(mood, MOOD_BEHAVIOR["neutral"])
+
+
+# ================================================================
+# PROVIDER DISPATCHER
+# ----------------------------------------------------------------
+# Single entry point every caller uses to actually reach a provider.
+# All providers receive short_term memory — fixes the inconsistency
+# where only Groq had context.
+# ================================================================
+
+def call_provider(msg, provider, model, system_prompt, short_term, device_id):
+    record_provider_usage(provider)
+    if provider == "groq":
+        return _call_groq(msg, model, system_prompt, short_term)
+    if provider == "openrouter":
+        return _call_openrouter(msg, model, system_prompt, short_term)
+    if provider == "gemini":
+        return _call_gemini(msg, model, system_prompt, short_term)
+    if provider == "cohere":
+        return _call_cohere(msg, system_prompt, short_term)
+    if provider == "cerebras":
+        return _call_cerebras(msg, model, system_prompt, short_term)
+    if provider == "mistral":
+        return _call_mistral(msg, system_prompt, short_term)
+    return None
