@@ -73,7 +73,7 @@ from services.rate_limit import is_rate_limited
 # ================================================================
 from core.router import (
     record_provider_usage, _provider_usage_count, provider_near_cap,
-    select_primary, route_model, get_mood_behavior,
+    select_primary, route_model, get_mood_behavior, call_provider,
 )
 
 # ================================================================
@@ -124,170 +124,15 @@ from skills.mathematics import (
 # ================================================================
 from core.text import _safe_json_loads
 # ================================================================
-# ACTION TRIGGER PARSER
+# ACTION/SEARCH/READ TAG PARSING — moved to core/tags.py.
+# RESEARCH MODE (run_research) — moved to skills/research.py.
 # ================================================================
-def extract_action_trigger(reply: str):
-    """
-    Finds the first [ACTION:...] tag and extracts its content.
-
-    JSON payloads get a balanced-brace scan rather than a regex, so:
-      - a ] inside a JSON array param doesn't get mistaken for the
-        tag's closing bracket
-      - a second [ACTION:...] tag later in the same reply doesn't get
-        swallowed into the first one (the old greedy .+ regex did
-        exactly this — grabbed everything up to the LAST ] in the
-        whole message, mangling both tags into one malformed blob)
-    Only the first tag in a reply is honored; the model is instructed
-    to send at most one per message.
-    """
-    idx = reply.find('[ACTION:')
-    if idx == -1:
-        return reply, None
-
-    start   = idx + len('[ACTION:')
-    content = reply[start:]
-
-    if content.lstrip().startswith('{'):
-        depth, end = 0, None
-        for i, ch in enumerate(content):
-            if ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        if end is None:
-            return reply, None  # unterminated JSON, nothing safe to extract
-        action   = content[:end].strip()
-        tag_end  = start + end
-        if tag_end < len(reply) and reply[tag_end] == ']':
-            tag_end += 1
-        clean = (reply[:idx] + reply[tag_end:]).strip()
-        return clean, sanitize_action(action)
-
-    # legacy plain-text command — stop at the first ], same as before
-    m = re.match(r'([^\]]+)\]', content)
-    if m:
-        action  = m.group(1).strip()
-        tag_end = start + m.end()
-        clean   = (reply[:idx] + reply[tag_end:]).strip()
-        return clean, sanitize_action(action)
-
-    return reply, None
-
-# ================================================================
-# WEB SEARCH — model-triggered, same pattern as [ACTION:...]
-# ----------------------------------------------------------------
-# The model can emit [SEARCH:query] when it judges a question needs
-# current information it wouldn't reliably know (news, prices, recent
-# events, "is X still true today" type questions). The server detects
-# this tag the same way it detects [ACTION:...], runs ONE search, and
-# feeds the results back to the model for a final answer. This keeps
-# search opt-in per-message rather than running on every request.
-# ================================================================
-def extract_search_trigger(reply: str):
-    m = re.search(r'\[SEARCH:([^\]]+)\]', reply)
-    if m:
-        query = m.group(1).strip()
-        clean = re.sub(r'\[SEARCH:[^\]]+\]', '', reply).strip()
-        return clean, query[:200]  # cap query length defensively
-    return reply, None
-
-# ================================================================
-# WEB SEARCH — model-triggered, same pattern as [ACTION:...]
-# ----------------------------------------------------------------
-# The model can emit [SEARCH:query] when it judges a question needs
-# current information it wouldn't reliably know (news, prices, recent
-# events, "is X still true today" type questions). The server detects
-# this tag the same way it detects [ACTION:...], runs ONE search, and
-# feeds the results back to the model for a final answer. This keeps
-# search opt-in per-message rather than running on every request.
-#
-# web_search() itself moved to integrations/web.py — see there.
-# ================================================================
+from core.tags import extract_action_trigger, extract_search_trigger, extract_read_trigger
 from integrations.web import (
     web_search, web_search_with_links, firecrawl_read,
     get_weather, extract_city_from_weather_query, get_news,
 )
-
-# ================================================================
-# FIRECRAWL — FULL PAGE READER
-# ----------------------------------------------------------------
-# Model emits [READ:url] to fetch full webpage content.
-# Free tier: 500 credits/month, 1 credit per scrape.
-# ================================================================
-def extract_read_trigger(reply: str):
-    m = re.search(r'\[READ:([^\]]+)\]', reply)
-    if m:
-        url   = m.group(1).strip()[:500]
-        clean = re.sub(r'\[READ:[^\]]+\]', '', reply).strip()
-        return clean, url
-    return reply, None
-
-# firecrawl_read() and web_search_with_links() moved to
-# integrations/web.py — imported in the block above.
-
-def run_research(topic: str, device_id: str, max_pages: int = 3) -> dict:
-    """
-    Phase 6: search, read the top pages, synthesize a summary, and
-    store what was learned as knowledge nodes using the same Phase 2/3
-    extraction and merge logic already built and tested. This is what
-    makes "research X" meaningfully different from just asking the
-    model directly — it gathers current information from real sources
-    instead of answering from training data alone.
-
-    Deliberately conservative on Firecrawl calls (max_pages default 3)
-    since the free tier is 500 credits/month, one credit per page read.
-    Falls back to search snippets alone if page reads all fail — still
-    useful, just shallower.
-    """
-    results = web_search_with_links(topic, num=5)
-    if not results:
-        return {"topic": topic, "summary": "", "sources": [], "nodes": [],
-                "note": "Search returned nothing — check SERPER_KEY or try a different phrasing."}
-
-    sources, page_texts = [], []
-    for item in results[:max_pages]:
-        content = firecrawl_read(item["url"])
-        if content:
-            sources.append({"title": item["title"], "url": item["url"]})
-            page_texts.append(f"### {item['title']} ({item['url']})\n{content[:2500]}")
-
-    if not page_texts:
-        page_texts = [f"- {r['title']}: {r['snippet']}" for r in results]
-        sources = [{"title": r["title"], "url": r["url"]} for r in results]
-
-    combined = "\n\n".join(page_texts)[:9000]
-
-    summary_prompt = (
-        f"Research topic: {topic}\n\n"
-        f"Sources gathered:\n{combined}\n\n"
-        "Write a clear, well-organized summary of what these sources say "
-        "about this topic. Note any disagreement between sources if there "
-        "is any. Do not add anything not supported by the text above."
-    )
-    summary = _call_groq_raw_extended(summary_prompt, max_tokens=900) or ""
-
-    nodes = []
-    if summary:
-        node_prompt = (
-            "Extract concept nodes from this research summary. A node is "
-            "a meaningful topic, person, place, or idea, not every noun. "
-            "Return ONLY valid JSON, this exact shape:\n"
-            '{"nodes": [{"id": "n1", "label": "short label", '
-            '"category": "one word", "related_to": ["n2"]}]}\n'
-            f"Summary:\n{summary}"
-        )
-        raw = _call_groq_raw_extended(node_prompt, max_tokens=700) or ""
-        clean = raw.strip().replace("```json", "").replace("```", "").strip()
-        s, e = clean.find("{"), clean.rfind("}") + 1
-        parsed = _safe_json_loads(clean[s:e]) if s >= 0 and e > 0 else None
-        nodes = parsed.get("nodes", []) if parsed else []
-        if nodes:
-            merge_nodes(device_id, nodes)
-
-    return {"topic": topic, "summary": summary, "sources": sources, "nodes": nodes}
+from skills.research import run_research
 
 # ================================================================
 # OFFLINE COMMAND DETECTION — moved to device/android.py.
@@ -298,213 +143,18 @@ from device.android import (
 )
 
 # ================================================================
-# INTENT PATTERNS
 # ================================================================
-INTENT_PATTERNS = {
-    "intent_whatsapp":        ["send a message", "send a text", "text someone",
-                               "message someone", "whatsapp someone", "i need to text",
-                               "i want to message", "i want to send a message",
-                               "send on whatsapp"],
-    "intent_call":            ["i need to call", "i want to call", "make a call",
-                               "ring someone", "phone someone", "give someone a call",
-                               "i need to speak to", "i want to talk to",
-                               "call someone for me"],
-    "intent_alarm":           ["i need to wake up at", "don't let me sleep past",
-                               "i have to be up by", "i need a reminder to wake",
-                               "remind me to wake", "i need to get up at",
-                               "wake me up at"],
-    "intent_music":           ["i want to listen", "i feel like listening",
-                               "put on some music", "i want some music",
-                               "music please", "something to listen to"],
-    "intent_open_app":        ["i want to use", "i need to use", "can you open",
-                               "take me to", "bring up", "i need to go to",
-                               "i want to go to"],
-    "intent_screenshot":      ["capture this", "save this screen",
-                               "take a picture of the screen",
-                               "save what i'm seeing", "snap this"],
-    "intent_battery":         ["is my battery okay", "battery dying",
-                               "check my battery", "how long will my battery last",
-                               "is my phone charged"],
-    "intent_brightness_down": ["too bright", "screen too bright", "hurting my eyes",
-                               "make it darker", "lower the light", "dim the screen",
-                               "reduce brightness", "screen is too bright"],
-    "intent_brightness_up":   ["too dim", "can't see the screen", "make it brighter",
-                               "increase the light", "screen is too dark",
-                               "brighten it up"],
-    "intent_volume_down":     ["too loud", "turn it down", "lower the sound",
-                               "make it quieter", "sound is too high",
-                               "reduce the volume", "lower volume"],
-    "intent_volume_up":       ["can't hear", "increase the sound", "make it louder",
-                               "sound is too low", "turn it up", "raise the volume"],
-    "intent_focus":           ["i need to focus", "help me focus",
-                               "i keep getting distracted",
-                               "stop me from wasting time",
-                               "i need to be productive",
-                               "help me stop procrastinating",
-                               "i'm wasting time", "put me in focus mode",
-                               "help me concentrate"],
-    "intent_task":            ["i need to remember to", "don't let me forget to",
-                               "add this to my list", "put this on my list",
-                               "note this down", "i need to do"],
-    "intent_lock":            ["lock up", "secure the phone", "i'm done with my phone",
-                               "lock it up", "secure it for me"],
-    "intent_sleep":           ["i'm going to sleep", "time for bed", "about to sleep",
-                               "heading to bed", "i'm sleepy",
-                               "turning in for the night", "i want to sleep",
-                               "i need to sleep", "help me sleep",
-                               "prepare for bed", "i need rest",
-                               "i'm going to rest", "let me sleep", "i'm tired"],
-    "intent_weather":         ["is it going to rain", "should i carry an umbrella",
-                               "what's the weather like", "how's the weather",
-                               "is it hot outside", "is it cold outside",
-                               "weather today", "weather outside"],
-    "intent_news":            ["what's going on in the world", "any news today",
-                               "current events", "what happened today",
-                               "what's in the news"],
-}
-
-def detect_user_intent(msg: str):
-    ml = msg.lower().strip()
-    for intent, patterns in INTENT_PATTERNS.items():
-        for p in patterns:
-            if p in ml:
-                return intent
-    return None
+# INTENT DETECTION + PENDING CONFIRMATIONS — moved to core/intent.py.
+# ================================================================
+from core.intent import (
+    INTENT_PATTERNS, detect_user_intent,
+    store_pending, check_user_confirmation,
+)
 
 # ================================================================
-# PENDING CONFIRMATIONS
+# INTENT RESPONSE BUILDER — moved to core/intent.py.
 # ================================================================
-def store_pending(device_id: str, action: str, follow_up: str):
-    PENDING_CONFIRMATIONS[device_id] = {
-        "action": action, "follow_up": follow_up, "timestamp": time.time()
-    }
-
-def check_user_confirmation(msg: str, device_id: str):
-    pending = PENDING_CONFIRMATIONS.get(device_id)
-    if not pending:
-        return None
-    if time.time() - pending.get("timestamp", 0) > 120:
-        del PENDING_CONFIRMATIONS[device_id]
-        return None
-    ml = msg.lower().strip()
-    pos = ["yes", "yeah", "yep", "sure", "ok", "okay", "go ahead", "please do",
-           "do it", "proceed", "definitely", "of course", "yes please", "yh",
-           "aye", "alright", "fine", "do that", "open it", "yes open",
-           "go on", "please"]
-    neg = ["no", "nope", "don't", "cancel", "stop", "never mind", "nah",
-           "not now", "skip it", "forget it", "no thanks", "don't do that",
-           "leave it"]
-    if any(ml == w or ml.startswith(w + " ") for w in pos):
-        action, fu = pending["action"], pending["follow_up"]
-        del PENDING_CONFIRMATIONS[device_id]
-        return fu, sanitize_action(action)
-    if any(ml == w or ml.startswith(w + " ") for w in neg):
-        del PENDING_CONFIRMATIONS[device_id]
-        return "No problem. Let me know if you need anything.", None
-    return None
-
-# ================================================================
-# INTENT RESPONSE BUILDER
-# ================================================================
-def build_intent_response(intent: str, msg: str, personality: dict, device_id: str):
-    name = clean_name(personality.get("nickname") or personality.get("name", ""))
-    n    = f"{name}, " if name else ""
-    ml   = msg.lower()
-
-    simple = {
-        "intent_brightness_down": (f"{n}adjusting screen brightness now.", "min brightness"),
-        "intent_brightness_up":   (f"{n}increasing brightness now.", "max brightness"),
-        "intent_volume_down":     (f"{n}lowering the volume.", "min volume"),
-        "intent_volume_up":       (f"{n}turning up the volume.", "max volume"),
-        "intent_battery":         (f"{n}checking your battery.", "battery level"),
-        "intent_lock":            (f"{n}locking your phone now.", "lock my phone"),
-        "intent_screenshot":      (f"{n}taking a screenshot.", "take screenshot"),
-    }
-    if intent in simple:
-        reply, action = simple[intent]
-        return reply, sanitize_action(action)
-
-    # These two used to return a canned "checking the weather" line with
-    # an action tag ("weather" / "latest news") that was never in the
-    # ALLOWED_ACTION_PREFIXES whitelist to begin with — so the reply
-    # promised to check, the tag silently got dropped downstream, and
-    # no real weather or news data was ever fetched or returned. Now
-    # they call the same functions the AI-routing weather/news path
-    # already uses correctly.
-    if intent == "intent_weather":
-        city = extract_city_from_weather_query(msg)
-        weather = get_weather(city)
-        if weather:
-            return f"{n}{weather}", None
-        return f"{n}I couldn't get the weather right now. Try again in a moment.", None
-
-    if intent == "intent_news":
-        news = get_news()
-        if news:
-            return f"{n}{news}", None
-        return f"{n}I couldn't get the news right now. Try again in a moment.", None
-
-    if intent == "intent_sleep":
-        store_pending(device_id, "sleep mode",
-                      f"Sleep mode set. Goodnight{', ' + name if name else ''}.")
-        return (f"Should I set up sleep mode{', ' + name if name else ''}? "
-                f"I will dim the screen, lower volume and turn on do not disturb."), None
-
-    if intent == "intent_focus":
-        store_pending(device_id, "focus mode", "Focus mode is active. Distractions limited.")
-        return f"{n}should I activate focus mode to help you concentrate?", None
-
-    if intent == "intent_whatsapp":
-        store_pending(device_id, "open whatsapp",
-                      "WhatsApp is open. Go ahead and send your message.")
-        return f"{n}should I open WhatsApp for you?", None
-
-    if intent == "intent_call":
-        for skip in ["i need to call", "i want to call", "make a call to",
-                     "ring", "phone"]:
-            if skip in ml:
-                contact = ml.replace(skip, "").strip()
-                if contact and len(contact) > 1:
-                    store_pending(device_id, f"call {contact}", f"Calling {contact}.")
-                    return f"{n}should I call {contact} for you?", None
-        return f"{n}who would you like me to call?", None
-
-    if intent == "intent_open_app":
-        for skip in ["i want to use", "i need to use", "can you open",
-                     "take me to", "bring up", "i need to go to",
-                     "i want to go to"]:
-            if skip in ml:
-                app_name = ml.replace(skip, "").strip()
-                app_name = app_name.replace(" the ", " ").replace(" app", "").strip()
-                if app_name and len(app_name) > 1:
-                    store_pending(device_id, f"open {app_name}", f"Opening {app_name}.")
-                    return f"{n}should I open {app_name} for you?", None
-        return f"{n}which app should I open?", None
-
-    if intent == "intent_music":
-        store_pending(device_id, "open spotify", "Opening your music.")
-        return f"{n}should I open your music app?", None
-
-    if intent == "intent_alarm":
-        m = re.search(r'(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', ml)
-        if m:
-            t = m.group(1).strip()
-            store_pending(device_id, f"set alarm for {t}", f"Alarm set for {t}.")
-            return f"{n}should I set an alarm for {t}?", None
-        return f"{n}what time should I set the alarm for?", None
-
-    if intent == "intent_task":
-        for skip in ["i need to remember to", "don't let me forget to",
-                     "add this to my list", "put this on my list",
-                     "note this down", "i need to do"]:
-            if skip in ml:
-                task = ml.replace(skip, "").strip()
-                if task and len(task) > 2:
-                    store_pending(device_id, f"add task {task}", f"Task added: {task}.")
-                    return f"{n}should I add '{task}' to your tasks?", None
-        return f"{n}what task should I add?", None
-
-    return None, None
+from core.intent import build_intent_response
 
 # ================================================================
 # MODEL ROUTER — word-boundary matching to cut false positives
@@ -767,87 +417,16 @@ def _stream_groq(model_input: str, msg: str, model: str, system_prompt: str,
     yield "data: [DONE]\n\n"
 
 
-def call_provider(msg, provider, model, system_prompt, short_term, device_id):
-    """All providers now receive short_term memory — fixes the
-    inconsistency where only Groq had context."""
-    record_provider_usage(provider)
-    if provider == "groq":
-        return _call_groq(msg, model, system_prompt, short_term)
-    if provider == "openrouter":
-        return _call_openrouter(msg, model, system_prompt, short_term)
-    if provider == "gemini":
-        return _call_gemini(msg, model, system_prompt, short_term)
-    if provider == "cohere":
-        return _call_cohere(msg, system_prompt, short_term)
-    if provider == "cerebras":
-        return _call_cerebras(msg, model, system_prompt, short_term)
-    if provider == "mistral":
-        return _call_mistral(msg, system_prompt, short_term)
-    return None
+# call_provider() moved to core/router.py — imported above.
 
 # ================================================================
 # TTS — Edge TTS primary (free, no quota/billing), OpenAI optional
 # fallback. Same /tts contract as before (base64 in JSON), so the
-# Android side needs zero changes.
 # ================================================================
+# TTS — full pipeline (raw generators + orchestration) moved to
+# integrations/tts.py.
 # ================================================================
-# TTS — raw generators (Edge TTS primary, OpenAI fallback) moved to
-# integrations/tts.py. generate_tts_base64() and _clean_for_speech()
-# stay here — they depend on convert_math_for_speech() and
-# extract_action_trigger(), core/skill logic not yet modularized.
-# ================================================================
-import asyncio
-import uuid as _uuid
-
-from integrations.tts import (
-    VALID_OPENAI_VOICES, EDGE_VOICE_MAP,
-    _generate_edge_tts, _generate_openai_tts,
-)
-
-# MATH-TO-SPEECH CONVERSION — moved to skills/mathematics.py, imported
-# above. _clean_for_speech() below calls convert_math_for_speech().
-
-def _clean_for_speech(text: str) -> str:
-    """Strips markdown/action-tags and converts math notation into
-    natural spoken phrasing, then truncates to a safe length.
-    Reuses extract_action_trigger's balanced-brace tag stripping
-    instead of a separate regex, so a JSON tool payload can't leave
-    trailing debris that TTS would read out loud."""
-    clean, _ = extract_action_trigger(text)
-    clean = convert_math_for_speech(clean)
-    clean = re.sub(r'#{1,3}\s*', '', clean)
-    clean = re.sub(r'\*\*([^*]+)\*\*', r'\1', clean)
-    clean = re.sub(r'^[-•]\s*', '', clean, flags=re.MULTILINE)
-    clean = re.sub(r'\s+', ' ', clean).strip()
-    return clean[:900]
-
-# _generate_edge_tts() and _generate_openai_tts() moved to
-# integrations/tts.py — imported above.
-
-def generate_tts_base64(text: str, voice: str = "onyx") -> tuple:
-    """
-    Returns (audio_base64, error_message). One will be empty.
-    Edge TTS is tried first since it has no billing/quota risk.
-    OpenAI is only used as a fallback if Edge TTS fails for some
-    reason and OPENAI_API_KEY happens to be configured and working —
-    giving you a working voice pipeline today regardless of OpenAI
-    account status, while still letting OpenAI act as a backup if
-    you fix billing later.
-    """
-    clean = _clean_for_speech(text)
-    if not clean:
-        return "", "No speakable content after cleaning"
-
-    audio, error = _generate_edge_tts(clean, voice)
-    if audio:
-        return audio, ""
-
-    print(f"[TTS] Edge TTS failed ({error}), trying OpenAI fallback")
-    audio, error2 = _generate_openai_tts(clean, voice)
-    if audio:
-        return audio, ""
-
-    return "", f"Both TTS providers failed. Edge: {error} | OpenAI: {error2}"
+from integrations.tts import generate_tts_base64
 
 # ================================================================
 # WEATHER & NEWS — moved to integrations/web.py, imported near the
