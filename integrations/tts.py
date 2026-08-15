@@ -1,24 +1,27 @@
 # ================================================================
 # GIDEON — integrations/tts.py
 # ----------------------------------------------------------------
-# Raw text-to-speech generation: Edge TTS (free, primary) and OpenAI
-# TTS (paid, fallback). Moved from server.py with zero behavior
-# change.
+# Full TTS pipeline: raw generators (Edge TTS primary, OpenAI
+# fallback) plus the orchestration on top — generate_tts_base64()
+# picks a generator and falls back, _clean_for_speech() strips
+# markdown/action-tags and converts math notation into natural
+# spoken phrasing before either generator ever sees the text.
 #
-# generate_tts_base64() and _clean_for_speech() are NOT here — they
-# depend on convert_math_for_speech() and extract_action_trigger(),
-# which are core/skill logic that hasn't been modularized yet. Moving
-# them now would either duplicate that logic or create a circular
-# import. They stay in server.py and call the two generators below.
+# Moved from server.py with zero behavior change. Now fully self-
+# contained — every dependency (convert_math_for_speech,
+# extract_action_trigger) had already been modularized elsewhere.
 # ================================================================
 
 import os
+import re
 import base64
 import asyncio
 import uuid as _uuid
 
 from config.environment import OPENAI_KEY
 from integrations.client import SESSION
+from core.tags import extract_action_trigger
+from skills.mathematics import convert_math_for_speech
 
 VALID_OPENAI_VOICES = {
     "alloy", "ash", "ballad", "coral", "echo",
@@ -111,3 +114,48 @@ def _generate_openai_tts(text: str, voice: str) -> tuple:
     except Exception as e:
         print(f"[TTS][OpenAI] exception: {e}")
         return "", str(e)
+
+
+# ================================================================
+# ORCHESTRATION — picks a generator, cleans text before either sees it
+# ================================================================
+
+def _clean_for_speech(text: str) -> str:
+    """Strips markdown/action-tags and converts math notation into
+    natural spoken phrasing, then truncates to a safe length.
+    Reuses extract_action_trigger's balanced-brace tag stripping
+    instead of a separate regex, so a JSON tool payload can't leave
+    trailing debris that TTS would read out loud."""
+    clean, _ = extract_action_trigger(text)
+    clean = convert_math_for_speech(clean)
+    clean = re.sub(r'#{1,3}\s*', '', clean)
+    clean = re.sub(r'\*\*([^*]+)\*\*', r'\1', clean)
+    clean = re.sub(r'^[-•]\s*', '', clean, flags=re.MULTILINE)
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    return clean[:900]
+
+
+def generate_tts_base64(text: str, voice: str = "onyx") -> tuple:
+    """
+    Returns (audio_base64, error_message). One will be empty.
+    Edge TTS is tried first since it has no billing/quota risk.
+    OpenAI is only used as a fallback if Edge TTS fails for some
+    reason and OPENAI_API_KEY happens to be configured and working —
+    giving you a working voice pipeline today regardless of OpenAI
+    account status, while still letting OpenAI act as a backup if
+    you fix billing later.
+    """
+    clean = _clean_for_speech(text)
+    if not clean:
+        return "", "No speakable content after cleaning"
+
+    audio, error = _generate_edge_tts(clean, voice)
+    if audio:
+        return audio, ""
+
+    print(f"[TTS] Edge TTS failed ({error}), trying OpenAI fallback")
+    audio, error2 = _generate_openai_tts(clean, voice)
+    if audio:
+        return audio, ""
+
+    return "", f"Both TTS providers failed. Edge: {error} | OpenAI: {error2}"
