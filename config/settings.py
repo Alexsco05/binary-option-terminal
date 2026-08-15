@@ -48,7 +48,18 @@ PROVIDER_SOFT_CAPS = {
 # ================================================================
 # MODEL REGISTRY
 # ----------------------------------------------------------------
-# llama-3.3-70b-versatile is the primary workhorse across every route —
+# openai/gpt-oss-120b is the primary workhorse across every route —
+# switched from llama-3.3-70b-versatile on 2026-08-15 ahead of Groq's
+# August 16, 2026 decommission of that model (confirmed via Groq's own
+# email + docs at console.groq.com/docs/model/openai/gpt-oss-120b).
+#
+# WATCH FOR: GPT-OSS models have built-in browser-search/tool-calling.
+# openai/gpt-oss-20b was previously avoided as a route primary for
+# exactly this reason — it interpreted [SEARCH:...] tags as a native
+# tool call instead of plain text, breaking the tag-based search
+# system. gpt-oss-120b has the same built-in capability; if [SEARCH:]
+# or [READ:] tags stop showing up correctly in replies after this
+# switch, that's the first thing to check.
 # higher free-tier TPM limit than openai/gpt-oss-20b (which caps at
 # 8k TPM and also interprets [SEARCH:...] tags as native tool calls,
 # breaking the tag-based search system). 70b handles all route types
@@ -64,7 +75,7 @@ PROVIDER_SOFT_CAPS = {
 # ================================================================
 MODELS = {
     "fast": {
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "primary": {"provider": "groq", "model": "openai/gpt-oss-120b"},
         "fallbacks": [
             {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
             {"provider": "cerebras",   "model": "gpt-oss-120b"},
@@ -72,7 +83,7 @@ MODELS = {
         ],
     },
     "complex": {
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "primary": {"provider": "groq", "model": "openai/gpt-oss-120b"},
         # gemini-1.5-flash was fully shut down by Google — was silently
         # 404ing on every fallback. gemini-3.5-flash is current GA with
         # no shutdown date announced as of this writing, but Google's
@@ -85,7 +96,7 @@ MODELS = {
         ],
     },
     "creative": {
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "primary": {"provider": "groq", "model": "openai/gpt-oss-120b"},
         "fallbacks": [
             {"provider": "mistral",    "model": "mistral-small-latest"},
             {"provider": "openrouter", "model": "mistralai/mistral-7b-instruct:free"},
@@ -93,7 +104,7 @@ MODELS = {
         ],
     },
     "empathetic": {
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "primary": {"provider": "groq", "model": "openai/gpt-oss-120b"},
         "fallbacks": [
             {"provider": "cerebras",   "model": "gpt-oss-120b"},
             {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
@@ -101,7 +112,7 @@ MODELS = {
         ],
     },
     "firm": {
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "primary": {"provider": "groq", "model": "openai/gpt-oss-120b"},
         "fallbacks": [
             {"provider": "openrouter", "model": "mistralai/mistral-7b-instruct:free"},
             {"provider": "mistral",    "model": "mistral-small-latest"},
@@ -113,7 +124,7 @@ MODELS = {
         # unverifiable given how fast that catalog rotates, and math
         # was failing outright whenever it went stale. Groq's general
         # model handles math well enough to be the safer primary.
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "primary": {"provider": "groq", "model": "openai/gpt-oss-120b"},
         "fallbacks": [
             {"provider": "openrouter", "model": "qwen/qwen3-coder:free"},
             {"provider": "cerebras",   "model": "gpt-oss-120b"},
@@ -126,7 +137,7 @@ MODELS = {
         # outage. Same reasoning as math: Groq primary, OpenRouter (now
         # with its own internal multi-model fallback) demoted to a
         # fallback slot instead of gating the whole route.
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "primary": {"provider": "groq", "model": "openai/gpt-oss-120b"},
         "fallbacks": [
             {"provider": "openrouter", "model": "qwen/qwen3-coder:free"},
             {"provider": "cerebras",   "model": "gpt-oss-120b"},
@@ -134,7 +145,7 @@ MODELS = {
         ],
     },
     "weather": {
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "primary": {"provider": "groq", "model": "openai/gpt-oss-120b"},
         "fallbacks": [
             {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
             {"provider": "mistral",    "model": "mistral-small-latest"},
@@ -142,7 +153,7 @@ MODELS = {
         ],
     },
     "news": {
-        "primary": {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        "primary": {"provider": "groq", "model": "openai/gpt-oss-120b"},
         "fallbacks": [
             {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"},
             {"provider": "mistral",    "model": "mistral-small-latest"},
