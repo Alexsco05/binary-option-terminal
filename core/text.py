@@ -9,6 +9,7 @@
 # ================================================================
 
 import re
+import json
 
 
 def clean_name(raw: str) -> str:
@@ -17,4 +18,16 @@ def clean_name(raw: str) -> str:
     cleaned = raw.split("[")[0].split("]")[0].strip()
     cleaned = re.sub(r"[^a-zA-Z0-9\s\-']", "", cleaned).strip()
     return cleaned[:50]
-  
+
+
+def _safe_json_loads(text: str):
+    """Parses JSON, repairing common trailing-comma issues from LLM output."""
+    try:
+        return json.loads(text)
+    except Exception:
+        try:
+            repaired = re.sub(r',\s*([\]}])', r'\1', text)
+            return json.loads(repaired)
+        except Exception as e:
+            print(f"[JSON] repair failed: {e}")
+            return None
