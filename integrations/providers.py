@@ -35,7 +35,7 @@ def _call_groq_raw(prompt: str):
             r = SESSION.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
-                json={"model": "llama-3.3-70b-versatile",
+                json={"model": "openai/gpt-oss-120b",
                       "messages": [{"role": "user", "content": prompt}],
                       "max_tokens": 500},
                 timeout=8,
@@ -60,7 +60,7 @@ def _call_groq_raw_extended(prompt: str, max_tokens: int = 1200):
             r = SESSION.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
-                json={"model": "llama-3.3-70b-versatile",
+                json={"model": "openai/gpt-oss-120b",
                       "messages": [{"role": "user", "content": prompt}],
                       "max_tokens": max_tokens},
                 timeout=12,
