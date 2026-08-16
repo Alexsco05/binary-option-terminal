@@ -45,6 +45,7 @@ from memory.personality import load_personality, update_long_term, extract_facts
 from device.android import detect_offline_command, build_action_trigger
 
 from skills.mathematics import latex_to_unicode, strip_stray_inline_dollars
+from core.skills import get_skill
 
 from integrations.web import (
     web_search, firecrawl_read, get_weather, get_news, extract_city_from_weather_query,
@@ -460,12 +461,26 @@ def process(msg: str, device_id: str):
         # the renderer needs, just the model echoing notation in prose)
         # gets unwrapped to plain text so it reads naturally in chat.
         clean = strip_stray_inline_dollars(clean)
-          else:
-        # math route keeps real $$ blocks for the WebView/MathJax renderer,
-        # but stray inline $a$ $b$ style wrapping (which isn't real LaTeX
-        # the renderer needs, just the model echoing notation in prose)
-        # gets unwrapped to plain text so it reads naturally in chat.
-        clean = strip_stray_inline_dollars(clean)
+
+    # Real, independent verification — not the model grading its own
+    # work. Pulled from whatever skill is registered for THIS route
+    # (see core/skills.py), not hardcoded to math — any skill that
+    # registers a verify function gets checked here automatically, no
+    # edit needed in this file. Right now only "math" has declared one,
+    # but this line doesn't know or care which skill that is.
+    # Only speaks up on a genuine, confident mismatch. Silent when the
+    # skill has no verifier, or the verifier has no opinion on this
+    # particular message (word problems, algebra, etc.) — a missed
+    # check is much cheaper than a false correction.
+    skill = get_skill(route)
+    if skill and skill.verify:
+        check = skill.verify(msg, clean)
+        if check.get("attempted") and check.get("verified") is False:
+            print(f"[Verification] Mismatch on '{msg[:60]}': {check['note']}")
+            clean += (
+                f"\n\n*(Double-checking that arithmetic independently, "
+                f"I get {check['expected']:g} — worth a second look.)*"
+            )
 
     # only cache informational replies — never cache anything carrying
     # an action_trigger (see Bug #1 fix note above)
