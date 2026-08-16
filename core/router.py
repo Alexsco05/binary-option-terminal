@@ -24,6 +24,7 @@ from integrations.providers import (
 )
 
 from config.settings import PROVIDER_SOFT_CAPS
+from core.skills import SKILL_REGISTRY
 
 
 # ================================================================
@@ -105,6 +106,14 @@ def _word_match(ml: str, keywords: list) -> bool:
 
 
 def route_model(msg: str, personality: dict) -> str:
+    """
+    Classifies a message into a skill name by checking each registered
+    skill's keywords, in registry order, first match wins. Used to
+    read from a hardcoded rules list duplicated across this function;
+    now reads from core/skills.py's SKILL_REGISTRY, so adding a new
+    skill's keywords means registering it there — this function
+    doesn't change.
+    """
     ml   = msg.lower()
     mood = personality.get("mood", "neutral")
 
@@ -115,72 +124,17 @@ def route_model(msg: str, personality: dict) -> str:
         "history of", "meaning of", "define"
     ])
 
-    rules = [
-        (["code", "program", "debug", "kotlin", "python", "java",
-          "function", "class", "compile", "gradle", "syntax",
-          "algorithm", "api", "json", "xml", "crash", "exception"],
-         "coding", False),
-        (["calculate", "solve", "equation", "integral", "derivative",
-          "algebra", "geometry", "trigonometry", "statistics",
-          "probability", "matrix", "calculus", "formula"],
-         "math", False),
-        (["weather", "temperature", "rain", "forecast", "hot outside",
-          "cold outside", "sunny", "cloudy"], "weather", False),
-        (["latest news", "news today", "current events",
-          "what happened today", "headlines"], "news", False),
-        (["joke", "funny", "humor", "laugh", "roast", "prank", "silly",
-          "entertain", "riddle"], "creative", False),
-        (["sad", "depressed", "anxious", "lonely", "stressed", "worried",
-          "scared", "angry", "upset", "hurt", "heartbreak", "crying",
-          "i feel", "i am tired", "nobody cares", "give up", "hopeless"],
-         "empathetic", False),
-        (["shut up", "stupid", "idiot", "useless", "hate you", "terrible",
-          "worst", "rubbish", "nonsense", "dumb", "you are trash",
-          "garbage", "pathetic"], "firm", False),
-        # ── these five were previously unreachable — SPECIALIST_BLOCKS
-        # defines "writing", "planning", "teaching", "research", and
-        # "business" specialists in full, but route_model() never had
-        # a rule that could actually select any of them, so every
-        # request that should have hit one fell into the generic
-        # "complex" catch-all instead. Placed before "complex" so
-        # first-match-wins routes these correctly now.
-        (["write a", "write me", "write an", "blog post", "short story",
-          "cover letter", "proofread", "rewrite this", "paraphrase",
-          "draft an email", "draft a message", "improve my writing",
-          "edit my writing", "summarize", "translate"], "writing", False),
-        (["plan my", "make a plan", "roadmap for", "schedule my",
-          "prioritize my", "project plan", "action plan",
-          "next steps for", "organize my", "timeline for",
-          "help me plan"], "planning", False),
-        (["teach me", "eli5", "explain like i'm five", "tutor me",
-          "quiz me", "walk me through", "help me learn",
-          "help me understand"], "teaching", False),
-        (["research about", "fact check", "is it true that",
-          "find sources on", "investigate", "look into",
-          "compare sources", "cite sources"], "research", False),
-        (["business plan", "startup idea", "revenue model",
-          "pricing strategy", "market analysis", "competitor analysis",
-          "pitch deck", "monetize", "profit margin", "business idea",
-          "go to market", "business strategy"], "business", False),
-        (["how can i", "how do i", "how should i", "what should i do",
-          "advice", "help me with", "i'm struggling", "i have a problem",
-          "colleague", "coworker", "boss", "manager", "workplace",
-          "relationship", "friend", "family", "disrespect", "conflict",
-          "argument", "deal with", "handle", "improve", "become better",
-          "learn how to", "what do you think", "your opinion", "recommend",
-          "explain", "analyze", "compare", "why", "how does",
-          "difference between", "pros and cons", "essay", "story",
-          "philosophy", "meaning of", "history of"], "complex", False),
-    ]
-
     # special case: "code" as a standalone word with explain framing
-    # (e.g. "explain Morse code") should not hit coding route
-    if "code" in ml.split() and explain_framing and "morse" in ml:
-        rules = [r for r in rules if r[1] != "coding"]
+    # (e.g. "explain Morse code") should not hit the coding skill
+    skip_coding = "code" in ml.split() and explain_framing and "morse" in ml
 
-    for keywords, route, _ in rules:
-        if _word_match(ml, keywords):
-            return route
+    for skill in SKILL_REGISTRY.values():
+        if skill.name == "coding" and skip_coding:
+            continue
+        if not skill.keywords:
+            continue  # "fast" has no keywords — it's the final fallback below
+        if _word_match(ml, skill.keywords):
+            return skill.name
 
     if mood in ["sad", "depressed", "lonely", "anxious"]:
         return "empathetic"
