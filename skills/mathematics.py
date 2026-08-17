@@ -69,13 +69,48 @@ def strip_stray_inline_dollars(text: str) -> str:
     unpaired $$ markers left over after that check are removed, since
     a lone $$ with nothing to pair with can't render as anything
     sensible on either side.
+
+    ALSO REJECTED: content that would actually break the client's
+    MathJax WebView renderer rather than just looking odd. A raw '#'
+    inside math mode is a reserved LaTeX macro-parameter character —
+    MathJax throws 'You can't use macro parameter character #' and
+    the whole block fails to render, visibly, as an error box in the
+    chat. A markdown bullet marker ('- ') at the start of a line
+    inside the block means the model wrote a list item INSIDE what
+    was supposed to be pure math, which produces the same kind of
+    broken render (English words with no spaces, since math mode
+    ignores whitespace — 'from x=0 to x=4' renders as
+    'fromx=0tox=4', not as readable text). Content that fails this
+    check gets its $$ delimiters stripped and falls back to plain
+    text instead of a broken WebView — a flat, readable fallback is
+    strictly better than a visible rendering crash.
+    ONE MORE CASE: prose crammed inside $$ with no markdown symbols at
+    all, e.g. '$$y=\\sqrt{x} from x=0 to x=4 about the x-axis$$'. This
+    doesn't trip the '#' or bullet checks above, but math mode still
+    ignores whitespace, so it renders as 'fromx=0tox=4aboutthex-axis'
+    — squished together, unreadable, no visible error but still
+    broken. Caught by counting common English connector words ('from',
+    'to', 'about', 'the', 'use', 'using', 'and', 'with', 'for', 'is',
+    'are') that essentially never appear as legitimate short variable
+    names in real math notation. Two or more is treated as prose that
+    leaked into the block rather than actual mathematics.
     """
     placeholders = []
+    _PROSE_WORDS = re.compile(
+        r'\b(from|to|about|the|use|using|and|with|for|is|are|then|when)\b',
+        re.IGNORECASE,
+    )
 
     def _is_real_pair(content: str) -> bool:
         if re.search(r'\n\s*\d+\.\s', content):
             return False
         if content.count('\n\n') > 0:
+            return False
+        if '#' in content:
+            return False
+        if re.search(r'(^|\n)\s*[-*]\s', content):
+            return False
+        if len(_PROSE_WORDS.findall(content)) >= 2:
             return False
         return True
 
