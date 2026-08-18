@@ -44,7 +44,7 @@ from memory.personality import load_personality, update_long_term, extract_facts
 
 from device.android import detect_offline_command, build_action_trigger
 
-from skills.mathematics import latex_to_unicode, strip_stray_inline_dollars
+from skills.mathematics import latex_to_unicode, strip_stray_inline_dollars, normalize_math_delimiters
 from core.skills import get_skill
 
 from integrations.web import (
@@ -153,37 +153,7 @@ def _split_into_sentence_chunks(text: str):
         yield buf
 
 
-def _fix_broken_inline_lists(text: str) -> str:
-    """
-    Safety net for a specific failure mode: the model strings bullet
-    items together inline using ' - ' as a plain-text separator instead
-    of putting each item on its own line — e.g. "I can help with -
-    **Calendar** - **Reminders** - **Files**" as one run-on sentence.
-    The system prompt explicitly forbids this now, but prompt
-    compliance isn't 100% reliable (this exact pattern showed up from
-    a real user report), so this catches it after the fact rather than
-    trusting instructions alone.
-
-    Deliberately narrow trigger: only fires when the shape ' - **'
-    (space, dash, space, then a bold marker — the start of a bolded
-    list item) appears 2 or more times in the same reply. That
-    specific, repeated shape is a strong signal of a broken pseudo-
-    list. A single dash in ordinary prose ("well-known", "state-of-
-    the-art") never matches — there's no surrounding whitespace-dash-
-    whitespace-then-bold pattern in normal writing.
-    """
-    matches = list(re.finditer(r'\s-\s(?=\*\*)', text))
-    if len(matches) < 2:
-        return text
-
-    result, last_end, first = [], 0, True
-    for m in matches:
-        result.append(text[last_end:m.start()])
-        result.append("\n\n- " if first else "\n- ")
-        first = False
-        last_end = m.end()
-    result.append(text[last_end:])
-    return "".join(result)
+from core.formatting import sanitize_formatting
 
 
 def _clean_for_route(text: str, route: str) -> str:
@@ -204,7 +174,7 @@ def _clean_for_route(text: str, route: str) -> str:
     code snippet inside a normal conversational answer doesn't get
     mangled either — that happens often, not just on the coding route.
     """
-    text = _fix_broken_inline_lists(text)
+    text = sanitize_formatting(text)
 
     if route == "coding":
         return text
@@ -218,7 +188,7 @@ def _clean_for_route(text: str, route: str) -> str:
     protected = re.sub(r'```.*?```', _stash, text, flags=re.DOTALL)
 
     if route == "math":
-        cleaned = strip_stray_inline_dollars(protected)
+        cleaned = strip_stray_inline_dollars(normalize_math_delimiters(protected))
     else:
         cleaned = latex_to_unicode(protected)
 
@@ -488,7 +458,7 @@ def process(msg: str, device_id: str):
             answer = pre_read_clean.strip() or "I could not access that page right now."
 
     clean, action_trigger = extract_action_trigger(answer)
-    clean = _fix_broken_inline_lists(clean)
+    clean = sanitize_formatting(clean)
     if route != "math":
         clean = latex_to_unicode(clean)
     else:
@@ -496,7 +466,11 @@ def process(msg: str, device_id: str):
         # but stray inline $a$ $b$ style wrapping (which isn't real LaTeX
         # the renderer needs, just the model echoing notation in prose)
         # gets unwrapped to plain text so it reads naturally in chat.
-        clean = strip_stray_inline_dollars(clean)
+        # Normalize \( \) and \[ \] to $ / $$ first — gpt-oss-120b's
+        # native delimiter style — so validation and the client both
+        # see one consistent format regardless of which style the
+        # model actually used.
+        clean = strip_stray_inline_dollars(normalize_math_delimiters(clean))
 
     # Real, independent verification — not the model grading its own
     # work. Pulled from whatever skill is registered for THIS route
