@@ -94,12 +94,40 @@ def strip_stray_inline_dollars(text: str) -> str:
     'are') that essentially never appear as legitimate short variable
     names in real math notation. Two or more is treated as prose that
     leaked into the block rather than actual mathematics.
+
+    TWO MORE, added after a real report where the above still wasn't
+    enough:
+
+    1. An ENTIRE ordinary sentence with no math content at all —
+       e.g. 'Here are a variety of calculus practice questions' — can
+       still slip through if it only contains ONE prose-list word
+       ('are', in that example). Rather than keep growing a word
+       blacklist forever, this adds a positive requirement instead: a
+       real math block MUST contain at least one actual math signal —
+       a digit, a backslash command, or a math operator (= + - * / ^
+       _). No signal at all means it's plainly not math, full stop,
+       regardless of which words happen to appear in it. This is what
+       actually caught the "entire sentence accidentally became a
+       math block" case — mismatched $$ counts elsewhere in the reply
+       paired an opening $$ with the wrong closing $$, sweeping up an
+       unrelated sentence in between. The word-list checks above are
+       still useful for content that DOES contain some real math
+       mixed with prose (like the sqrt example) and so wouldn't be
+       caught by "no math signal at all" alone.
+
+    2. Unbalanced braces — '\\frac{a}{b' missing its closing brace,
+       or similar. MathJax reports this as "Extra close brace or
+       missing open brace" and fails the same visible way. A quick
+       count of '{' vs '}' catches the common case (not a full parser,
+       but genuine LaTeX from a model rarely nests unbalanced braces
+       any other way in practice).
     """
     placeholders = []
     _PROSE_WORDS = re.compile(
         r'\b(from|to|about|the|use|using|and|with|for|is|are|then|when)\b',
         re.IGNORECASE,
     )
+    _MATH_SIGNAL = re.compile(r'[\d\\=+\-*/^_]')
 
     def _is_real_pair(content: str) -> bool:
         if re.search(r'\n\s*\d+\.\s', content):
@@ -111,6 +139,10 @@ def strip_stray_inline_dollars(text: str) -> str:
         if re.search(r'(^|\n)\s*[-*]\s', content):
             return False
         if len(_PROSE_WORDS.findall(content)) >= 2:
+            return False
+        if not _MATH_SIGNAL.search(content):
+            return False
+        if content.count('{') != content.count('}'):
             return False
         return True
 
