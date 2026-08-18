@@ -177,7 +177,11 @@ def build_system_prompt(personality: dict, route: str = "fast") -> str:
         f"Short answers need no formatting — plain sentences are cleaner. "
         f"A casual request like 'give me a tour' or 'what can you do' wants "
         f"a short, warm, conversational answer — not a structured feature "
-        f"list with headings and bullets for every category.\n\n"
+        f"list with headings and bullets for every category. "
+        f"Never use '---' as a section divider — the client does not "
+        f"render it as anything, it just shows as three literal dashes. "
+        f"Use a ## heading instead, which the client does render "
+        f"correctly.\n\n"
         f"Every heading, bullet list, numbered list, code block, and math "
         f"block needs a real blank line before it and a real blank line "
         f"after it — an actual empty line, not just the marker symbol. "
@@ -201,6 +205,10 @@ def build_system_prompt(personality: dict, route: str = "fast") -> str:
         f"- **Calendar** — schedule and track events\n"
         f"- **Reminders** — never forget a task\n"
         f"- **Files** — find things on your phone'\n\n"
+        f"THE SAME APPLIES TO NUMBERED LISTS. Never write "
+        f"'1. First step 2. Second step 3. Third step' as one run-on "
+        f"sentence. Each numbered item starts its own new line, exactly "
+        f"like bullets above.\n\n"
 
         # ── RULES ─────────────────────────────────────────────────
         f"RULES:\n"
