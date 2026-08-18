@@ -47,6 +47,36 @@ def latex_to_unicode(text: str) -> str:
     return text
 
 
+def normalize_math_delimiters(text: str) -> str:
+    """
+    Converts LaTeX's native inline/display delimiters — \\( ... \\) and
+    \\[ ... \\] — into the $ ... $ / $$ ... $$ style the rest of this
+    pipeline (strip_stray_inline_dollars) and the Android client's
+    containsLatex() both already validate and render.
+
+    Why this exists: the system prompt asks for $/$$ delimiters, and
+    the model that used to run this route mostly complied. The current
+    model (gpt-oss-120b) instead defaults to standard LaTeX \\( \\) and
+    \\[ \\] notation regardless of what the prompt asks for. Without
+    this normalization step, that content passes straight through
+    every downstream check untouched — not rejected, just never
+    recognized as math at all — and the client shows the raw LaTeX
+    commands as literal text instead of rendering anything.
+
+    Runs BEFORE strip_stray_inline_dollars, so its content-quality
+    checks (balanced braces, no prose leakage, etc.) apply uniformly
+    regardless of which delimiter style the model happened to use.
+
+    The backslash immediately before the bracket/paren is the safe,
+    unambiguous signal — ordinary prose never contains a literal
+    backslash right before '(' or '[', so this never fires on a
+    normal citation '[1]' or parenthetical '(see above)'.
+    """
+    text = re.sub(r'\\\[(.*?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
+    text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text, flags=re.DOTALL)
+    return text
+
+
 def strip_stray_inline_dollars(text: str) -> str:
     """
     Leaves real $$ ... $$ display blocks and single-$ inline variables
@@ -161,10 +191,36 @@ def strip_stray_inline_dollars(text: str) -> str:
     protected = re.sub(r'\$\$(.*?)\$\$', _protect_checked, text, flags=re.DOTALL)
     protected = re.sub(r'\\\[.*?\\\]', _protect, protected, flags=re.DOTALL)
 
-    # single-$ inline math ($a$, $x$) is left as-is now — the client
-    # renders it. Only genuinely leftover, unpaired $$ markers (never
-    # matched to a confirmed real pair above) get removed, since those
-    # can't render as anything on either side.
+    # Single-$ inline math ($a$, $x$) mostly renders fine untouched, and
+    # the full _is_real_pair checks above are too strict for it — a
+    # legitimate short variable like $a$ has no digit/operator/backslash
+    # and would incorrectly fail the "must contain a math signal" check
+    # meant for full equations. But now that normalize_math_delimiters()
+    # can produce single-$ spans from \( \), a genuinely malformed one
+    # (bullet marker or heading leaking in, unbalanced braces) can slip
+    # through unvalidated. This applies only the checks that are
+    # unambiguous regardless of span length — a short real variable name
+    # never starts with '#' or '- ', and never has unbalanced braces.
+    def _is_safe_inline(content: str) -> bool:
+        if '#' in content:
+            return False
+        if re.search(r'(^|\n)\s*[-*]\s', content):
+            return False
+        if content.count('{') != content.count('}'):
+            return False
+        return True
+
+    def _validate_inline(match):
+        content = match.group(1)
+        if _is_safe_inline(content):
+            return match.group(0)
+        return content  # strip the $ delimiters, keep the text readable
+
+    protected = re.sub(r'(?<!\$)\$([^\$\n]+)\$(?!\$)', _validate_inline, protected)
+
+    # Only genuinely leftover, unpaired $$ markers (never matched to a
+    # confirmed real pair above) get removed, since those can't render
+    # as anything on either side.
     protected = re.sub(r'\${2,}', '', protected)
 
     # restore protected display blocks
