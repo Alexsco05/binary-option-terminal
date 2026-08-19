@@ -29,6 +29,100 @@
 import re
 
 
+_BLOCK_START_PATTERNS = (
+    re.compile(r'^#'),
+    re.compile(r'^[-•*]\s'),
+    re.compile(r'^\d+\.\s'),
+    re.compile(r'^```'),
+)
+
+
+def _is_block_element_line(line: str) -> bool:
+    """True if this line is a real block-level markdown element the
+    client specifically recognizes and needs on its own line — a
+    heading, bullet, numbered item, or code fence marker. Lines like
+    this are never merged into surrounding paragraph text."""
+    stripped = line.strip()
+    return any(p.match(stripped) for p in _BLOCK_START_PATTERNS)
+
+
+def unwrap_paragraphs(text: str) -> str:
+    """
+    Joins consecutive non-blank lines within the same paragraph into
+    one continuous line, unless a line is a real block element
+    (heading, bullet, numbered item, code fence) or part of a
+    multi-line $$ ... $$ / \\[ ... \\] math block.
+
+    This is standard markdown "soft wrap" behavior — a single newline
+    inside a paragraph is supposed to be just a wrap point, equivalent
+    to a space, not a real line break. But the client's renderer works
+    line by line: anything that's the ONLY thing on its own line gets
+    its own UI element. When the model puts a short inline math mention
+    on its own line — "If\n$F'$\nis an antiderivative of\n$f$\non\n
+    $[a,b]$\n, then..." instead of one flowing sentence — the client
+    (correctly, given its own logic) treats each fragment as a separate
+    block, rendering three isolated boxes instead of one readable
+    sentence with inline math embedded. This repairs that shape before
+    it ever reaches the client, regardless of which route produced it.
+
+    Multi-line $$ blocks and code fences are tracked with a small state
+    machine and passed through completely untouched — their internal
+    line structure is deliberate (a derivation's steps, a code file's
+    real formatting) and must never be collapsed.
+    """
+    lines = text.split('\n')
+    result, buffer = [], []
+    in_math_block = False
+    in_code_block = False
+
+    def flush():
+        if buffer:
+            result.append(' '.join(buffer))
+            buffer.clear()
+
+    for line in lines:
+        stripped = line.strip()
+
+        if in_math_block:
+            result.append(line)
+            if stripped in ('$$', '\\]'):
+                in_math_block = False
+            continue
+
+        if in_code_block:
+            result.append(line)
+            if stripped.startswith('```'):
+                in_code_block = False
+            continue
+
+        if stripped in ('$$', '\\['):
+            flush()
+            result.append(line)
+            in_math_block = True
+            continue
+
+        if stripped.startswith('```'):
+            flush()
+            result.append(line)
+            in_code_block = True
+            continue
+
+        if not stripped:
+            flush()
+            result.append('')
+            continue
+
+        if _is_block_element_line(line):
+            flush()
+            result.append(line)
+            continue
+
+        buffer.append(stripped)
+
+    flush()
+    return '\n'.join(result)
+
+
 def _fix_broken_inline_bullets(text: str) -> str:
     """
     The model strings bullet items together inline using ' - ' as a
@@ -163,6 +257,7 @@ def sanitize_formatting(text: str) -> str:
     Android renderer needs, unrelated to which specialist produced
     the text.
     """
+    text = unwrap_paragraphs(text)
     text = _fix_broken_inline_bullets(text)
     text = _fix_broken_inline_numbered_lists(text)
     text = _fix_inline_headings(text)
