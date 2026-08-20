@@ -123,6 +123,68 @@ def unwrap_paragraphs(text: str) -> str:
     return '\n'.join(result)
 
 
+_ISOLATED_SHORT_MATH = re.compile(r'^\$[^\$\n]{1,30}\$$')
+
+
+def merge_isolated_math_paragraphs(text: str) -> str:
+    """
+    unwrap_paragraphs only merges fragments within the SAME paragraph
+    (no blank line between them). But the model sometimes puts a short
+    single-$ math mention — '$[a,b]$', '$C$' — in its OWN paragraph,
+    correctly surrounded by blank lines the way the system prompt asks
+    full $$ equations to be formatted, but never intended for
+    something this short. There's nothing else in that paragraph to
+    merge it with, so unwrap_paragraphs can't touch it — it stays
+    isolated, and the client still gives it its own standalone box for
+    the same reason described there.
+
+    This looks at the paragraph level instead: a "paragraph" that is
+    NOTHING BUT a short $...$ span gets merged into whichever
+    neighboring paragraph actually continues the sentence it belongs
+    to. The signal used: if the paragraph right after the isolated
+    math starts with a lowercase letter, that's a strong sign it's
+    the back half of a sentence the isolated math started ("$C$" then
+    "is an arbitrary constant...") — merging backward instead would
+    bolt it onto whatever unrelated heading or bullet came before,
+    while leaving the real continuation as an orphaned fragment with
+    no subject. Otherwise this merges backward into the previous
+    paragraph — the more common case (some intro text, then a short
+    aside like "$[a,b]$" that belongs at the end of that sentence).
+
+    Only single-$ spans are ever touched — a real $$ block is SUPPOSED
+    to stand alone with blank lines around it, and this must never
+    merge one of those into surrounding prose.
+    """
+    paragraphs = text.split('\n\n')
+    n = len(paragraphs)
+    keep = [True] * n
+
+    for i, para in enumerate(paragraphs):
+        stripped = para.strip()
+        if not _ISOLATED_SHORT_MATH.match(stripped):
+            continue
+
+        next_para = paragraphs[i + 1].lstrip() if i + 1 < n else ""
+        next_continues = bool(next_para) and next_para[0].islower()
+
+        if next_continues:
+            paragraphs[i + 1] = stripped + " " + paragraphs[i + 1].lstrip()
+            keep[i] = False
+        elif i > 0 and keep[i - 1]:
+            # find the nearest preceding paragraph that's still standing
+            j = i - 1
+            while j > 0 and not keep[j]:
+                j -= 1
+            paragraphs[j] = paragraphs[j].rstrip() + " " + stripped
+            keep[i] = False
+        elif i + 1 < n:
+            # no usable previous paragraph -- merge forward regardless
+            paragraphs[i + 1] = stripped + " " + paragraphs[i + 1].lstrip()
+            keep[i] = False
+
+    return '\n\n'.join(p for p, k in zip(paragraphs, keep) if k)
+
+
 def _fix_broken_inline_bullets(text: str) -> str:
     """
     The model strings bullet items together inline using ' - ' as a
@@ -258,6 +320,7 @@ def sanitize_formatting(text: str) -> str:
     the text.
     """
     text = unwrap_paragraphs(text)
+    text = merge_isolated_math_paragraphs(text)
     text = _fix_broken_inline_bullets(text)
     text = _fix_broken_inline_numbered_lists(text)
     text = _fix_inline_headings(text)
