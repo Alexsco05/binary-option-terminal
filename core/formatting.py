@@ -123,37 +123,41 @@ def unwrap_paragraphs(text: str) -> str:
     return '\n'.join(result)
 
 
-_ISOLATED_SHORT_MATH = re.compile(r'^\$[^\$\n]{1,30}\$$')
+_ISOLATED_SHORT_MATH = re.compile(r'^\$([^\$\n]{1,30})\$$')
+_ISOLATED_SHORT_DISPLAY_MATH = re.compile(r'^\$\$([^\$\n]{1,40})\$\$$')
 
 
 def merge_isolated_math_paragraphs(text: str) -> str:
     """
     unwrap_paragraphs only merges fragments within the SAME paragraph
     (no blank line between them). But the model sometimes puts a short
-    single-$ math mention — '$[a,b]$', '$C$' — in its OWN paragraph,
-    correctly surrounded by blank lines the way the system prompt asks
-    full $$ equations to be formatted, but never intended for
-    something this short. There's nothing else in that paragraph to
-    merge it with, so unwrap_paragraphs can't touch it — it stays
-    isolated, and the client still gives it its own standalone box for
-    the same reason described there.
+    math mention — '$[a,b]$', '$C$', or even '$$f(x)$$', '$$u$$' — in
+    its OWN paragraph, correctly surrounded by blank lines the way the
+    system prompt asks full equations to be formatted, but never
+    intended for something this trivial. There's nothing else in that
+    paragraph to merge it with, so unwrap_paragraphs can't touch it —
+    it stays isolated, and the client gives it its own standalone box.
 
-    This looks at the paragraph level instead: a "paragraph" that is
-    NOTHING BUT a short $...$ span gets merged into whichever
-    neighboring paragraph actually continues the sentence it belongs
-    to. The signal used: if the paragraph right after the isolated
-    math starts with a lowercase letter, that's a strong sign it's
-    the back half of a sentence the isolated math started ("$C$" then
-    "is an arbitrary constant...") — merging backward instead would
-    bolt it onto whatever unrelated heading or bullet came before,
-    while leaving the real continuation as an orphaned fragment with
-    no subject. Otherwise this merges backward into the previous
-    paragraph — the more common case (some intro text, then a short
-    aside like "$[a,b]$" that belongs at the end of that sentence).
+    Handles BOTH single-$ and $$ isolated paragraphs now. The prompt
+    already asks the model to only use $$ for genuinely standalone
+    equations, but that instruction isn't reliable enough on its own —
+    a single letter like $$u$$ or $$b$$ still shows up wrapped in
+    display-math delimiters in practice. A $$ block is only treated as
+    "genuinely standalone" if it's actually substantial (over ~40
+    characters of content) — a single variable or short expression in
+    $$ still gets the same isolated-paragraph treatment as a $ one,
+    and gets DOWNGRADED to single-$ when merged, since once it's
+    flowing inline it's no longer display math.
 
-    Only single-$ spans are ever touched — a real $$ block is SUPPOSED
-    to stand alone with blank lines around it, and this must never
-    merge one of those into surrounding prose.
+    Direction is chosen the same way either case: if the paragraph
+    right after the isolated math starts with a lowercase letter,
+    that's a strong sign it's the back half of a sentence the isolated
+    math started ("$$u$$" then "is the lower limit...") — merging
+    backward instead would bolt it onto an unrelated heading above it
+    while leaving the real continuation orphaned. Otherwise this
+    merges backward into the previous paragraph — the more common
+    case (some intro text, then a short aside that belongs at the end
+    of that sentence).
     """
     paragraphs = text.split('\n\n')
     n = len(paragraphs)
@@ -161,28 +165,98 @@ def merge_isolated_math_paragraphs(text: str) -> str:
 
     for i, para in enumerate(paragraphs):
         stripped = para.strip()
-        if not _ISOLATED_SHORT_MATH.match(stripped):
+        m_single = _ISOLATED_SHORT_MATH.match(stripped)
+        m_display = _ISOLATED_SHORT_DISPLAY_MATH.match(stripped)
+        if m_single:
+            inline_form = stripped
+        elif m_display:
+            inline_form = f"${m_display.group(1)}$"  # downgrade $$ -> $
+        else:
             continue
 
         next_para = paragraphs[i + 1].lstrip() if i + 1 < n else ""
         next_continues = bool(next_para) and next_para[0].islower()
 
         if next_continues:
-            paragraphs[i + 1] = stripped + " " + paragraphs[i + 1].lstrip()
+            paragraphs[i + 1] = inline_form + " " + paragraphs[i + 1].lstrip()
             keep[i] = False
         elif i > 0 and keep[i - 1]:
             # find the nearest preceding paragraph that's still standing
             j = i - 1
             while j > 0 and not keep[j]:
                 j -= 1
-            paragraphs[j] = paragraphs[j].rstrip() + " " + stripped
+            paragraphs[j] = paragraphs[j].rstrip() + " " + inline_form
             keep[i] = False
         elif i + 1 < n:
             # no usable previous paragraph -- merge forward regardless
-            paragraphs[i + 1] = stripped + " " + paragraphs[i + 1].lstrip()
+            paragraphs[i + 1] = inline_form + " " + paragraphs[i + 1].lstrip()
             keep[i] = False
 
     return '\n\n'.join(p for p, k in zip(paragraphs, keep) if k)
+
+
+def _looks_like_fragment(stripped: str) -> bool:
+    """True if this paragraph reads as an unfinished sentence rather
+    than a complete thought — no terminal punctuation at the end.
+    A real $$ block or a block element (heading/bullet/numbered/code
+    fence) is never treated as a fragment, even without terminal
+    punctuation — those are allowed to stand alone by design."""
+    if not stripped:
+        return False
+    if _is_block_element_line(stripped):
+        return False
+    if stripped.startswith('$$') and stripped.endswith('$$'):
+        return False
+    return stripped[-1] not in '.!?:'
+
+
+def recombine_sentence_fragments(text: str) -> str:
+    """
+    merge_isolated_math_paragraphs handles math specifically getting
+    isolated onto its own paragraph. This catches the broader version
+    of the same failure: the model sometimes puts nearly EVERY few
+    words of one sentence into its own blank-line-separated paragraph
+    — "the signed area under" / "$f(x)$" / "from" / "$u$" / "to" /
+    "$b$" / ", written" / "$$..." — not just the math parts. Plain
+    words like "from" and "to" aren't math at all, so
+    merge_isolated_math_paragraphs never touches them, and the
+    sentence stays fragmented even after that fix runs.
+
+    The signal used here is simpler and more general: a paragraph
+    that doesn't end in terminal punctuation (. ! ? :) is very likely
+    an unfinished sentence, regardless of whether it contains math or
+    not. Consecutive fragment paragraphs get joined into one, up
+    through and including the first one that DOES look complete.
+    Block elements and genuinely substantial $$ blocks are never
+    pulled into this — they're allowed to stand alone with no
+    trailing punctuation (a heading doesn't end in a period).
+    """
+    paragraphs = text.split('\n\n')
+    result, buffer = [], []
+
+    def flush():
+        if buffer:
+            result.append(' '.join(buffer))
+            buffer.clear()
+
+    for para in paragraphs:
+        stripped = para.strip()
+        if not stripped:
+            flush()
+            result.append('')
+            continue
+        if _is_block_element_line(stripped) or (
+            stripped.startswith('$$') and stripped.endswith('$$')
+        ):
+            flush()
+            result.append(stripped)
+            continue
+        buffer.append(stripped)
+        if not _looks_like_fragment(stripped):
+            flush()
+
+    flush()
+    return '\n\n'.join(result)
 
 
 def _fix_broken_inline_bullets(text: str) -> str:
@@ -195,14 +269,18 @@ def _fix_broken_inline_bullets(text: str) -> str:
     the first dash just shows as literal text.
 
     Deliberately narrow trigger: only fires when the shape ' - **'
-    (space, dash, space, then a bold marker — the start of a bolded
-    list item) appears 2 or more times in the same reply. That
-    specific, repeated shape is a strong signal of a broken pseudo-
-    list. A single dash in ordinary prose ("well-known", "state-of-
-    the-art") never matches — there's no surrounding whitespace-dash-
-    whitespace-then-bold pattern in normal writing.
+    (a literal space, dash, space, then a bold marker — the start of
+    a bolded list item) appears 2 or more times in the same reply.
+    Requires a literal space character specifically before the dash,
+    not any whitespace — using \\s here originally also matched a
+    newline, which meant a REAL bullet correctly starting its own
+    line (preceded by '\\n\\n' or '\\n', both whitespace) got
+    miscounted as a crammed inline instance and incorrectly rewrapped,
+    injecting a stray extra blank line into an already-correct list.
+    A literal space only matches genuine mid-sentence text like
+    "...with - **Calendar**", never a line-starting bullet marker.
     """
-    matches = list(re.finditer(r'\s-\s(?=\*\*)', text))
+    matches = list(re.finditer(r' -\s(?=\*\*)', text))
     if len(matches) < 2:
         return text
 
@@ -257,6 +335,25 @@ def _fix_broken_inline_numbered_lists(text: str) -> str:
         last_end = m.start()
     result.append(text[last_end:])
     return "".join(result)
+
+
+_SINGLE_HASH_HEADING = re.compile(r'(?<!#)#(?!#)\s+(?=\*\*|[A-Z])')
+
+
+def _normalize_single_hash_headings(text: str) -> str:
+    """
+    The client only ever checks for '## ' and '### ' — a bare single
+    '#' is never recognized as a heading at all, so it shows as a
+    literal '#' character in the chat instead of becoming anything
+    styled. Upgrades a bare '#' to '##' so it actually renders.
+
+    Only fires when the '#' is followed by something heading-shaped —
+    a bold marker or a capitalized word — specifically to avoid
+    misfiring on something like a Python comment ('# initialize the
+    counter') that starts lowercase and would never legitimately be a
+    heading in the first place.
+    """
+    return _SINGLE_HASH_HEADING.sub('## ', text)
 
 
 _HEADING = re.compile(r'(?<!\A)(?<!\n)(#{2,3}\s)')
@@ -321,8 +418,10 @@ def sanitize_formatting(text: str) -> str:
     """
     text = unwrap_paragraphs(text)
     text = merge_isolated_math_paragraphs(text)
+    text = recombine_sentence_fragments(text)
     text = _fix_broken_inline_bullets(text)
     text = _fix_broken_inline_numbered_lists(text)
+    text = _normalize_single_hash_headings(text)
     text = _fix_inline_headings(text)
     text = _fix_unpaired_bold(text)
     text = _fix_unpaired_code_fence(text)
