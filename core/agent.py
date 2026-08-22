@@ -154,6 +154,11 @@ def _split_into_sentence_chunks(text: str):
 
 
 from core.formatting import sanitize_formatting
+from realtime.events import emit_state, THINKING, DORMANT, new_task_id
+from realtime.tasks import (
+    emit_task_started, emit_task_planning, emit_task_progress,
+    emit_task_completed, workspace_for_route,
+)
 
 
 def _clean_for_route(text: str, route: str) -> str:
@@ -279,16 +284,35 @@ def process_multi_step(msg: str, device_id: str):
 
     print(f"[Planner] '{msg[:60]}' -> {len(steps)} step(s): {steps}")
 
-    personality    = load_personality(device_id)
+    # Task lifecycle events (schema §3) — this is the one place in the
+    # backend that has genuine multi-step structure to report. A
+    # single-shot process() call never gets these; only a request
+    # that's actually been confirmed as multi-part, right here, is a
+    # "task" in the schema's sense.
+    task_id = new_task_id()
+    personality = load_personality(device_id)
+    first_route = route_model(steps[0], personality)
+    emit_task_started(
+        device_id, task_id,
+        intent="multi_step_request",
+        workspace=workspace_for_route(first_route),
+        summary=msg[:200],
+    )
+    emit_task_planning(device_id, task_id, steps)
+
     short_term     = get_short_term(device_id)
     answers        = []
     action_trigger = None
+    step_total     = len(steps)
 
-    for step in steps:
+    for step_index, step in enumerate(steps, start=1):
         route         = route_model(step, personality)
         system_prompt = build_system_prompt(personality, route)
         model_cfg     = MODELS.get(route, MODELS["fast"])
         primary       = select_primary(model_cfg)
+
+        emit_task_progress(device_id, task_id, step_index, step_total, step[:100])
+        emit_state(device_id, THINKING, step[:100])
 
         answer = call_provider(step, primary["provider"],
                                primary["model"], system_prompt,
@@ -313,6 +337,9 @@ def process_multi_step(msg: str, device_id: str):
     trim_short_term(short_term)
     EXECUTOR.submit(update_long_term, msg, combined, device_id)
     extract_facts(msg, device_id)
+
+    emit_task_completed(device_id, task_id, summary="Task complete")
+    emit_state(device_id, DORMANT)
 
     return combined, action_trigger
 
@@ -343,6 +370,12 @@ def process(msg: str, device_id: str):
 
     personality   = load_personality(device_id)
     cache_key     = f"{device_id}:{msg.lower()}"
+
+    # Phase 1 of the realtime event system — the orb reflects real
+    # work starting now, not a hardcoded animation. Silently does
+    # nothing if this device has no live WebSocket connection (see
+    # emit_state's return value — never blocks or raises either way).
+    emit_state(device_id, THINKING, "Thinking...")
 
     # 5. AI routing
     route         = route_model(msg, personality)
@@ -400,6 +433,7 @@ def process(msg: str, device_id: str):
                 break
 
     if not answer:
+        emit_state(device_id, DORMANT)
         return "I could not process that right now. Please try again.", None
 
     # ── WEB SEARCH (model-triggered) ────────────────────────────────
@@ -503,6 +537,8 @@ def process(msg: str, device_id: str):
 
     EXECUTOR.submit(update_long_term, msg, clean, device_id)
     extract_facts(msg, device_id)
+
+    emit_state(device_id, DORMANT)
 
     return clean, action_trigger
 
