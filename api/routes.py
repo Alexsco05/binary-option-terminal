@@ -36,7 +36,7 @@ from core.router import route_model, select_primary, call_provider, _provider_us
 from core.tags import extract_action_trigger, extract_search_trigger, extract_read_trigger
 from core.prompts import build_system_prompt
 from core.agent import (
-    process, resolve_immediate_reply, _stream_groq,
+    process, process_multi_step, resolve_immediate_reply, _stream_groq,
     _split_into_sentence_chunks, _clean_for_route,
 )
 
@@ -218,6 +218,33 @@ def register_routes(app):
                     yield f"data: [ACTION:{action_trigger}]\n\n"
                 yield "data: [DONE]\n\n"
             return Response(stream_with_context(shortcut_gen()),
+                            mimetype="text/event-stream")
+
+        # Phase 5 continued — same exact short-circuit process() already
+        # uses (see core/agent.py). process_multi_step() returns None
+        # immediately for anything that isn't genuinely multi-part, so
+        # this adds no latency or behavior change to ordinary single-shot
+        # voice replies below. When it DOES engage, it already runs the
+        # full task.started/planning/progress/workspace lifecycle
+        # end-to-end and returns the finished reply — so this sends it
+        # the same way the shortcut path above does: as sentence chunks
+        # over the existing SSE stream. _stream_groq() itself is not
+        # touched, so its barge-in/GeneratorExit handling is unaffected
+        # for every case that reaches it, because multi-part requests
+        # never reach it now — same as they never reached it before,
+        # except now they get real task/workspace events instead of a
+        # plain streamed answer with no realtime events at all.
+        multi = process_multi_step(msg, device_id)
+        if multi is not None:
+            reply, action_trigger = multi
+            def multi_gen():
+                chunks = list(_split_into_sentence_chunks(reply))
+                for chunk in (chunks or [reply]):
+                    yield f"data: {chunk}\n\n"
+                if action_trigger and action_trigger not in ("None", "null"):
+                    yield f"data: [ACTION:{action_trigger}]\n\n"
+                yield "data: [DONE]\n\n"
+            return Response(stream_with_context(multi_gen()),
                             mimetype="text/event-stream")
 
         personality  = load_personality(device_id)
