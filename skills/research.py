@@ -14,6 +14,7 @@ from integrations.web import web_search_with_links, firecrawl_read
 from integrations.providers import _call_groq_raw_extended
 from core.text import _safe_json_loads
 from memory.knowledge import merge_nodes
+from realtime.tools import emit_skill_started, run_tool
 
 
 def run_research(topic: str, device_id: str, max_pages: int = 3) -> dict:
@@ -27,14 +28,21 @@ def run_research(topic: str, device_id: str, max_pages: int = 3) -> dict:
     Falls back to search snippets alone if page reads all fail — still
     useful, just shallower.
     """
-    results = web_search_with_links(topic, num=5)
+    emit_skill_started(device_id, "research", f"Researching {topic[:60]}")
+
+    results = run_tool(
+        device_id, "web.search", f"Searching for {topic[:60]}",
+        lambda: web_search_with_links(topic, num=5),
+    )
     if not results:
         return {"topic": topic, "summary": "", "sources": [], "nodes": [],
                 "note": "Search returned nothing — check SERPER_KEY or try a different phrasing."}
-
     sources, page_texts = [], []
     for item in results[:max_pages]:
-        content = firecrawl_read(item["url"])
+        content = run_tool(
+            device_id, "web.read", f"Reading {item['title'][:60]}",
+            lambda url=item["url"]: firecrawl_read(url),
+        )
         if content:
             sources.append({"title": item["title"], "url": item["url"]})
             page_texts.append(f"### {item['title']} ({item['url']})\n{content[:2500]}")
