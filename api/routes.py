@@ -18,6 +18,8 @@ import json
 import requests
 from flask import request, jsonify, Response, stream_with_context
 
+from storage import safe_device_id
+
 from config.environment import (
     BOT_NAME, GROQ_KEYS, OPENROUTER_KEYS, MISTRAL_KEYS,
     GEMINI_KEY, COHERE_KEY, CEREBRAS_KEY, WEATHER_KEY, NEWS_KEY,
@@ -38,7 +40,10 @@ from core.agent import (
     _split_into_sentence_chunks, _clean_for_route,
 )
 
-from memory.conversation import CACHE, USER_SHORT_TERM, PENDING_CONFIRMATIONS, get_short_term, trim_short_term
+from memory.conversation import (
+    CACHE, EXECUTOR, USER_SHORT_TERM, PENDING_CONFIRMATIONS,
+    get_short_term, trim_short_term,
+)
 from memory.personality import (
     load_personality, save_personality, save_history,
     update_long_term, extract_facts,
@@ -49,6 +54,13 @@ from skills.research import run_research
 from integrations.web import web_search, firecrawl_read, get_weather, get_news, extract_city_from_weather_query
 from integrations.providers import _call_groq_raw_extended
 from integrations.tts import generate_tts_base64
+
+from realtime.events import new_task_id
+from realtime.tasks import emit_task_started, emit_task_completed, emit_task_failed
+from realtime.workspace import (
+    emit_workspace_open, heading_block, body_block, source_list_block,
+    divider_block, action_row_block, WORKSPACE_ACTIONS,
+)
 
 
 def register_routes(app):
@@ -304,7 +316,6 @@ def register_routes(app):
             short_term.append({"role": "user",     "content": msg})
             short_term.append({"role": "assistant", "content": final})
             trim_short_term(short_term)
-            from memory.conversation import EXECUTOR
             EXECUTOR.submit(update_long_term, msg, final, device_id)
             extract_facts(msg, device_id)
 
@@ -345,7 +356,43 @@ def register_routes(app):
             return jsonify({"topic": "", "summary": "", "sources": [], "nodes": [],
                             "note": "No topic provided."})
 
+        # Phase 5 — workspace control. run_research() already emits its
+        # own skill.started/tool.started/tool.completed events (see
+        # skills/research.py), so wrapping it in task.started/completed
+        # here just adds the outer task frame the schema expects for a
+        # bounded operation like this, consistent with how
+        # process_multi_step() already brackets its own work.
+        task_id = new_task_id()
+        emit_task_started(
+            device_id, task_id,
+            intent="research_topic",
+            workspace="research",
+            summary=f"Researching {topic}"[:200],
+        )
+
         result = run_research(topic, device_id)
+
+        if result.get("summary"):
+            blocks = [heading_block("Findings"), body_block(result["summary"])]
+            if result.get("sources"):
+                blocks.append(source_list_block("Sources", result["sources"]))
+            blocks.append(divider_block())
+            blocks.append(action_row_block(WORKSPACE_ACTIONS["research"]))
+
+            emit_workspace_open(
+                device_id, task_id, "research",
+                title="Research",
+                data={"title": "Research", "subtitle": topic, "blocks": blocks},
+            )
+            emit_task_completed(device_id, task_id, summary="Research complete",
+                                result={"topic": topic, "source_count": len(result.get("sources", []))})
+        else:
+            emit_task_failed(
+                device_id, task_id, error="no_results",
+                message=result.get("note") or "Research produced no results.",
+                recoverable=True,
+            )
+
         return jsonify(result)
 
     @app.route("/extract-knowledge", methods=["POST"])
@@ -905,8 +952,3 @@ def register_routes(app):
             "cache_size": len(CACHE),
             "active_device_count": len(USER_SHORT_TERM),
         })
-
-
-# safe_device_id is imported lazily inside functions above via the
-# top-level import below, kept at module scope so every route can use it.
-from storage import safe_device_id
