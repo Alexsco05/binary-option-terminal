@@ -159,6 +159,12 @@ from realtime.tasks import (
     emit_task_started, emit_task_planning, emit_task_progress,
     emit_task_completed, workspace_for_route,
 )
+from realtime.tools import emit_skill_started, run_tool
+from realtime.workspace import (
+    emit_workspace_open, emit_workspace_update,
+    heading_block, body_block, progress_block, divider_block,
+    action_row_block, WORKSPACE_ACTIONS,
+)
 
 
 def _clean_for_route(text: str, route: str) -> str:
@@ -292,10 +298,11 @@ def process_multi_step(msg: str, device_id: str):
     task_id = new_task_id()
     personality = load_personality(device_id)
     first_route = route_model(steps[0], personality)
+    workspace   = workspace_for_route(first_route)
     emit_task_started(
         device_id, task_id,
         intent="multi_step_request",
-        workspace=workspace_for_route(first_route),
+        workspace=workspace,
         summary=msg[:200],
     )
     emit_task_planning(device_id, task_id, steps)
@@ -305,6 +312,23 @@ def process_multi_step(msg: str, device_id: str):
     action_trigger = None
     step_total     = len(steps)
 
+    # Phase 5 — workspace control. Only opens a workspace when the
+    # first step actually maps to one (workspace_for_route returns None
+    # for e.g. "fast"/"complex"/"empathetic" — those stay plain
+    # conversation, same as before this existed). The initial payload
+    # only has what's genuinely known this early: the request itself
+    # and a starting progress block — nothing invented ahead of time.
+    if workspace:
+        emit_workspace_open(
+            device_id, task_id, workspace,
+            title=msg[:80],
+            data={
+                "title": msg[:80],
+                "subtitle": f"{step_total} step{'s' if step_total != 1 else ''}",
+                "blocks": [progress_block("Starting", 0)],
+            },
+        )
+
     for step_index, step in enumerate(steps, start=1):
         route         = route_model(step, personality)
         system_prompt = build_system_prompt(personality, route)
@@ -313,6 +337,12 @@ def process_multi_step(msg: str, device_id: str):
 
         emit_task_progress(device_id, task_id, step_index, step_total, step[:100])
         emit_state(device_id, THINKING, step[:100])
+
+        if workspace:
+            percent = int(round((step_index / step_total) * 100)) if step_total else 0
+            emit_workspace_update(device_id, task_id, {
+                "blocks": [progress_block(step[:100], percent)]
+            })
 
         answer = call_provider(step, primary["provider"],
                                primary["model"], system_prompt,
@@ -337,6 +367,14 @@ def process_multi_step(msg: str, device_id: str):
     trim_short_term(short_term)
     EXECUTOR.submit(update_long_term, msg, combined, device_id)
     extract_facts(msg, device_id)
+
+    if workspace:
+        final_blocks = [heading_block("Result"), body_block(combined)]
+        actions = WORKSPACE_ACTIONS.get(workspace, [])
+        if actions:
+            final_blocks.append(divider_block())
+            final_blocks.append(action_row_block(actions))
+        emit_workspace_update(device_id, task_id, {"blocks": final_blocks})
 
     emit_task_completed(device_id, task_id, summary="Task complete")
     emit_state(device_id, DORMANT)
@@ -379,6 +417,7 @@ def process(msg: str, device_id: str):
 
     # 5. AI routing
     route         = route_model(msg, personality)
+    emit_skill_started(device_id, route, f"Working on {route}")
     system_prompt = build_system_prompt(personality, route)
     short_term    = get_short_term(device_id)
 
@@ -445,7 +484,10 @@ def process(msg: str, device_id: str):
     pre_search_clean, search_query = extract_search_trigger(answer)
     if search_query:
         print(f"[Search] Model requested search: '{search_query}'")
-        results = web_search(search_query)
+        results = run_tool(
+            device_id, "web.search", f"Searching for {search_query[:60]}",
+            lambda: web_search(search_query),
+        )
         if results:
             followup_prompt = (
                 f"User asked: {msg}\n\n"
@@ -480,7 +522,10 @@ def process(msg: str, device_id: str):
     pre_read_clean, read_url = extract_read_trigger(answer)
     if read_url:
         print(f"[Firecrawl] Model requested read: '{read_url}'")
-        page_content = firecrawl_read(read_url)
+        page_content = run_tool(
+            device_id, "web.read", f"Reading {read_url[:60]}",
+            lambda: firecrawl_read(read_url),
+        )
         if page_content:
             followup = call_provider(
                 f"User asked: {msg}\n\nYou read: {read_url}\nContent:\n{page_content}\n\nAnswer naturally.",
