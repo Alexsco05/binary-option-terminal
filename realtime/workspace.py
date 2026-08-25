@@ -30,7 +30,15 @@ def emit_workspace_open(device_id: str, task_id: str, workspace: str,
     payload = {"workspace": workspace, "title": title, "data": data or {}}
     if mode:
         payload["mode"] = mode
-    return emit_event(device_id, "workspace.open", payload, task_id=task_id)
+    sent = emit_event(device_id, "workspace.open", payload, task_id=task_id)
+    # emit_event is silent on success by design (it's fire-and-forget for
+    # every other event too, and most of them fire constantly). This one
+    # print is deliberate: workspace.open is rare and high-signal, and
+    # its silence was previously indistinguishable from a real failure —
+    # "no error in the log" never actually meant "it was sent."
+    print(f"[Workspace] open '{workspace}' for {device_id} (task {task_id}) "
+          f"-> {'sent' if sent else 'NOT sent: no live connection for this device'}")
+    return sent
 
 
 def emit_workspace_update(device_id: str, task_id: str, data: dict) -> bool:
