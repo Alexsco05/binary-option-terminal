@@ -278,8 +278,10 @@ def process_multi_step(msg: str, device_id: str):
     to the existing single-shot path completely unchanged. Nothing
     about how single-part requests are handled is touched by this.
 
-    Scoped to /run (typed chat) only for now — see the note in
-    process() for why voice sessions aren't wired to this yet.
+    Called from both process() (/run) and the /stream route directly
+    (see api/routes.py) — the same short-circuit pattern in both
+    places, so multi-part requests get identical task/workspace
+    events regardless of whether they arrived as text or voice.
     """
     if not _looks_multi_part(msg):
         return None
@@ -299,6 +301,8 @@ def process_multi_step(msg: str, device_id: str):
     personality = load_personality(device_id)
     first_route = route_model(steps[0], personality)
     workspace   = workspace_for_route(first_route)
+    print(f"[Planner] first step routed to '{first_route}' -> "
+          f"workspace: {workspace or '(none — plain conversation, no workspace event)'}")
     emit_task_started(
         device_id, task_id,
         intent="multi_step_request",
