@@ -299,7 +299,17 @@ def process_multi_step(msg: str, device_id: str):
     # "task" in the schema's sense.
     task_id = new_task_id()
     personality = load_personality(device_id)
-    first_route = route_model(steps[0], personality)
+    # Classify against the ORIGINAL message, not steps[0]. plan_steps()
+    # rewrites each step into its own phrasing for the model — e.g. "help
+    # me plan out my whole week" becomes "Create a detailed weekly
+    # schedule for Alex, outlining..." for step 1. route_model() matches
+    # exact phrases like "help me plan"/"schedule my", which the rewrite
+    # can silently drop even though the user's own words plainly had
+    # planning intent. This is a pre-existing gap in how task.started's
+    # workspace field was already being classified (Phase 4, before any
+    # of this session's changes) — it just had no visible effect until
+    # workspace.open depended on the same value being right.
+    first_route = route_model(msg, personality)
     workspace   = workspace_for_route(first_route)
     print(f"[Planner] first step routed to '{first_route}' -> "
           f"workspace: {workspace or '(none — plain conversation, no workspace event)'}")
