@@ -1,11 +1,9 @@
 # ================================================================
 # GIDEON — integrations/tts.py
 # ----------------------------------------------------------------
-# Full TTS pipeline: raw generators (Edge TTS primary, OpenAI
-# fallback) plus the orchestration on top — generate_tts_base64()
-# picks a generator and falls back, _clean_for_speech() strips
-# markdown/action-tags and converts math notation into natural
-# spoken phrasing before either generator ever sees the text.
+# Full voice-audio pipeline: TTS generators (Edge TTS primary, OpenAI
+# fallback) plus the orchestration on top, and cloud transcription
+# (Groq Whisper) for the /transcribe endpoint (schema §13).
 #
 # Moved from server.py with zero behavior change. Now fully self-
 # contained — every dependency (convert_math_for_speech,
@@ -18,7 +16,7 @@ import base64
 import asyncio
 import uuid as _uuid
 
-from config.environment import OPENAI_KEY
+from config.environment import OPENAI_KEY, GROQ_KEYS
 from integrations.client import SESSION
 from core.tags import extract_action_trigger
 from skills.mathematics import convert_math_for_speech
@@ -159,3 +157,70 @@ def generate_tts_base64(text: str, voice: str = "onyx") -> tuple:
         return audio, ""
 
     return "", f"Both TTS providers failed. Edge: {error} | OpenAI: {error2}"
+
+
+# ================================================================
+# CLOUD TRANSCRIPTION (schema §13) — Groq Whisper. Optional, non-
+# blocking: the client already has a fully-working local transcript
+# (Vosk) the instant speech ends, and only waits up to a short fixed
+# timeout for this before falling back to it. Failing here just means
+# the client uses its local result instead — never a broken voice
+# conversation.
+#
+# Same GROQ_KEYS rotation pattern as integrations/providers.py, since
+# Groq's Whisper endpoint shares the same account/key as the LLM
+# calls already in use — no new provider account needed.
+# ================================================================
+
+def transcribe_pcm16(audio_bytes: bytes, sample_rate: int = 16000) -> tuple:
+    """
+    Returns (transcript, error_message). One will be empty. Wraps raw
+    PCM16 mono bytes in a minimal WAV header — Groq's endpoint (like
+    every standard Whisper API) expects a real audio container, not
+    bare samples, even though the client sends headerless PCM per
+    schema §13 to avoid wasting bandwidth on a header over the wire.
+    The header is added here, in memory, right before the API call —
+    the client-facing contract stays exactly as documented.
+    """
+    if not audio_bytes:
+        return "", "No audio data received"
+
+    wav_bytes = _pcm16_to_wav(audio_bytes, sample_rate)
+
+    for key in GROQ_KEYS:
+        if not key:
+            continue
+        try:
+            r = SESSION.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {key}"},
+                files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+                data={"model": "whisper-large-v3-turbo"},
+                timeout=8,
+            )
+            if r.status_code == 200:
+                text = r.json().get("text", "").strip()
+                return text, ""
+            else:
+                print(f"[Transcribe][Groq] {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            print(f"[Transcribe][Groq] {e}")
+
+    return "", "All transcription providers failed"
+
+
+def _pcm16_to_wav(pcm_bytes: bytes, sample_rate: int) -> bytes:
+    """Minimal 44-byte WAV header for mono 16-bit PCM — no external
+    dependency needed for something this small and fixed-format."""
+    import struct
+    num_channels, bits_per_sample = 1, 16
+    byte_rate   = sample_rate * num_channels * bits_per_sample // 8
+    block_align = num_channels * bits_per_sample // 8
+    data_size   = len(pcm_bytes)
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF", 36 + data_size, b"WAVE", b"fmt ", 16, 1,
+        num_channels, sample_rate, byte_rate, block_align,
+        bits_per_sample, b"data", data_size,
+    )
+    return header + pcm_bytes
