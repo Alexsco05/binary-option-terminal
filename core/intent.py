@@ -24,6 +24,9 @@ from core.text import clean_name
 from memory.conversation import PENDING_CONFIRMATIONS
 from core.permissions import sanitize_action
 from integrations.web import get_weather, get_news, extract_city_from_weather_query
+from realtime.permissions import (
+    new_permission_id, emit_permission_required, emit_action_execute, VALID_DECISIONS,
+)
 
 INTENT_PATTERNS = {
     "intent_whatsapp":        ["send a message", "send a text", "text someone",
@@ -102,13 +105,37 @@ def detect_user_intent(msg: str):
 # PENDING CONFIRMATIONS
 # ================================================================
 
-def store_pending(device_id: str, action: str, follow_up: str):
+def store_pending(device_id: str, action: str, follow_up: str,
+                  label: str = None, level: str = "device_control",
+                  reason: str = None, task_id=None) -> str:
+    """
+    Stores a pending confirmation AND emits the structured
+    permission.required event (schema §6) alongside it. The same
+    pending action can now be resolved two ways: the user's next
+    message saying yes/no (check_user_confirmation, below, entirely
+    unchanged), or a tap on the card that just got pushed
+    (resolve_permission_response, called when permission.response
+    arrives over the socket). Returns the permission_id — not used by
+    any current caller, but store_pending is the only place it's
+    generated, so callers that need it later have it available.
+    """
+    permission_id = new_permission_id()
     PENDING_CONFIRMATIONS[device_id] = {
-        "action": action, "follow_up": follow_up, "timestamp": time.time()
+        "action": action, "follow_up": follow_up, "timestamp": time.time(),
+        "permission_id": permission_id, "task_id": task_id,
     }
+    emit_permission_required(
+        device_id, task_id, permission_id,
+        action=label or action, level=level, reason=reason,
+    )
+    return permission_id
 
 
 def check_user_confirmation(msg: str, device_id: str):
+    # Path 1 of 2 for resolving a pending confirmation — spoken/typed
+    # "yes"/"no" as the user's next message. See
+    # resolve_permission_response below for the other path (a tapped
+    # permission card, arriving asynchronously over the socket).
     pending = PENDING_CONFIRMATIONS.get(device_id)
     if not pending:
         return None
@@ -131,6 +158,59 @@ def check_user_confirmation(msg: str, device_id: str):
         del PENDING_CONFIRMATIONS[device_id]
         return "No problem. Let me know if you need anything.", None
     return None
+
+
+def resolve_permission_response(device_id: str, payload: dict) -> None:
+    """
+    Path 2 of 2 for resolving a pending confirmation — a permission
+    card tap, dispatched here from realtime/socket_server.py when a
+    permission.response event arrives (schema §6). Same
+    PENDING_CONFIRMATIONS entry as check_user_confirmation above,
+    just matched by permission_id instead of parsed from a spoken
+    reply, and with no HTTP request in flight to return an answer
+    through — see realtime/permissions.py's module docstring for why
+    that means the approved action goes out via action.execute
+    instead of the usual response body.
+
+    "always_allow" is currently treated identically to "allow_once" —
+    it executes immediately, same as this session's approval, but
+    nothing yet remembers the choice to skip asking again next time.
+    That's a real feature on its own (needs a place to persist
+    per-action-type approval across sessions) and deliberately isn't
+    bundled into this change.
+    """
+    pending = PENDING_CONFIRMATIONS.get(device_id)
+    if not pending:
+        return
+    if time.time() - pending.get("timestamp", 0) > 120:
+        del PENDING_CONFIRMATIONS[device_id]
+        print(f"[Permission] {device_id}'s pending action expired before a response arrived")
+        return
+    if payload.get("permission_id") != pending.get("permission_id"):
+        # Stale or mismatched response — e.g. already resolved via the
+        # spoken path, or a duplicate/late tap on an old card. Ignore
+        # rather than acting on the wrong pending action.
+        print(f"[Permission] {device_id} sent a response for a permission_id "
+              f"that isn't the current pending one, ignoring")
+        return
+
+    decision = payload.get("decision")
+    task_id  = pending.get("task_id")
+    del PENDING_CONFIRMATIONS[device_id]
+
+    if decision not in VALID_DECISIONS:
+        print(f"[Permission] {device_id} sent an unrecognized decision "
+              f"'{decision}', treating as deny")
+        return
+
+    print(f"[Permission] {device_id} resolved '{pending['action']}' -> {decision}")
+
+    if decision in ("allow_once", "always_allow"):
+        action = sanitize_action(pending["action"])
+        if action:
+            emit_action_execute(device_id, task_id, action, message=pending.get("follow_up"))
+    # "deny": nothing to push back — the client already knows locally
+    # that it denied and can dismiss its own card without our help.
 
 
 # ================================================================
@@ -177,17 +257,23 @@ def build_intent_response(intent: str, msg: str, personality: dict, device_id: s
 
     if intent == "intent_sleep":
         store_pending(device_id, "sleep mode",
-                      f"Sleep mode set. Goodnight{', ' + name if name else ''}.")
+                      f"Sleep mode set. Goodnight{', ' + name if name else ''}.",
+                      label="Activate Sleep Mode", level="device_control",
+                      reason="To dim your screen, lower the volume, and enable Do Not Disturb")
         return (f"Should I set up sleep mode{', ' + name if name else ''}? "
                 f"I will dim the screen, lower volume and turn on do not disturb."), None
 
     if intent == "intent_focus":
-        store_pending(device_id, "focus mode", "Focus mode is active. Distractions limited.")
+        store_pending(device_id, "focus mode", "Focus mode is active. Distractions limited.",
+                      label="Activate Focus Mode", level="device_control",
+                      reason="To help you concentrate by limiting distractions")
         return f"{n}should I activate focus mode to help you concentrate?", None
 
     if intent == "intent_whatsapp":
         store_pending(device_id, "open whatsapp",
-                      "WhatsApp is open. Go ahead and send your message.")
+                      "WhatsApp is open. Go ahead and send your message.",
+                      label="Open WhatsApp", level="communicate",
+                      reason="To send your message")
         return f"{n}should I open WhatsApp for you?", None
 
     if intent == "intent_call":
@@ -196,7 +282,9 @@ def build_intent_response(intent: str, msg: str, personality: dict, device_id: s
             if skip in ml:
                 contact = ml.replace(skip, "").strip()
                 if contact and len(contact) > 1:
-                    store_pending(device_id, f"call {contact}", f"Calling {contact}.")
+                    store_pending(device_id, f"call {contact}", f"Calling {contact}.",
+                                  label=f"Call {contact}", level="communicate",
+                                  reason=f"To reach {contact}")
                     return f"{n}should I call {contact} for you?", None
         return f"{n}who would you like me to call?", None
 
@@ -208,19 +296,23 @@ def build_intent_response(intent: str, msg: str, personality: dict, device_id: s
                 app_name = ml.replace(skip, "").strip()
                 app_name = app_name.replace(" the ", " ").replace(" app", "").strip()
                 if app_name and len(app_name) > 1:
-                    store_pending(device_id, f"open {app_name}", f"Opening {app_name}.")
+                    store_pending(device_id, f"open {app_name}", f"Opening {app_name}.",
+                                  label=f"Open {app_name.title()}", level="device_control")
                     return f"{n}should I open {app_name} for you?", None
         return f"{n}which app should I open?", None
 
     if intent == "intent_music":
-        store_pending(device_id, "open spotify", "Opening your music.")
+        store_pending(device_id, "open spotify", "Opening your music.",
+                      label="Open Music App", level="device_control",
+                      reason="To play music for you")
         return f"{n}should I open your music app?", None
 
     if intent == "intent_alarm":
         m = re.search(r'(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', ml)
         if m:
             t = m.group(1).strip()
-            store_pending(device_id, f"set alarm for {t}", f"Alarm set for {t}.")
+            store_pending(device_id, f"set alarm for {t}", f"Alarm set for {t}.",
+                          label=f"Set Alarm for {t}", level="device_control")
             return f"{n}should I set an alarm for {t}?", None
         return f"{n}what time should I set the alarm for?", None
 
@@ -231,7 +323,9 @@ def build_intent_response(intent: str, msg: str, personality: dict, device_id: s
             if skip in ml:
                 task = ml.replace(skip, "").strip()
                 if task and len(task) > 2:
-                    store_pending(device_id, f"add task {task}", f"Task added: {task}.")
+                    store_pending(device_id, f"add task {task}", f"Task added: {task}.",
+                                  label="Add Task", level="write",
+                                  reason=f'To add "{task}" to your list')
                     return f"{n}should I add '{task}' to your tasks?", None
         return f"{n}what task should I add?", None
 
