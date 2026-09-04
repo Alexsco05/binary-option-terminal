@@ -181,6 +181,21 @@ def transcribe_pcm16(audio_bytes: bytes, sample_rate: int = 16000) -> tuple:
     schema §13 to avoid wasting bandwidth on a header over the wire.
     The header is added here, in memory, right before the API call —
     the client-facing contract stays exactly as documented.
+
+    language="en" is forced explicitly rather than left to Whisper's
+    auto-detection — with accented speech, auto-detect occasionally
+    guesses the wrong language entirely for a whole utterance, which
+    derails the transcript far worse than any accent-accuracy issue
+    within English itself.
+
+    `prompt` is Whisper's vocabulary-biasing mechanism, not a
+    conversation starter — it never appears in the output, it just
+    nudges the decoder toward matching sounds to this vocabulary
+    when the audio is ambiguous. _ACCENT_PROMPT_HINT below exists
+    specifically because Whisper's training data skews toward
+    American/British English, so common Nigerian names and everyday
+    Nigerian English/Pidgin phrasing are exactly the words most
+    likely to get mis-heard as something else without this nudge.
     """
     if not audio_bytes:
         return "", "No audio data received"
@@ -195,7 +210,11 @@ def transcribe_pcm16(audio_bytes: bytes, sample_rate: int = 16000) -> tuple:
                 "https://api.groq.com/openai/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {key}"},
                 files={"file": ("audio.wav", wav_bytes, "audio/wav")},
-                data={"model": "whisper-large-v3-turbo"},
+                data={
+                    "model": "whisper-large-v3-turbo",
+                    "language": "en",
+                    "prompt": _ACCENT_PROMPT_HINT,
+                },
                 timeout=8,
             )
             if r.status_code == 200:
@@ -207,6 +226,22 @@ def transcribe_pcm16(audio_bytes: bytes, sample_rate: int = 16000) -> tuple:
             print(f"[Transcribe][Groq] {e}")
 
     return "", "All transcription providers failed"
+
+
+# Whisper's prompt is a vocabulary hint, not a system instruction — kept
+# short and dense with names/words likely to appear and get misheard,
+# not full sentences. Names span several Nigerian ethnic groups
+# deliberately, since the accent this needs to handle isn't one
+# monolithic thing. Feel free to extend this list from real transcripts
+# once you see which specific words keep coming out wrong.
+_ACCENT_PROMPT_HINT = (
+    "Nigerian English speaker. Common words: abeg, wahala, omo, sha, abi, "
+    "wetin, how far, no wahala, sabi, dey, na, gist, jare. "
+    "Common names: Chidinma, Chukwuemeka, Ngozi, Adaeze, Emeka, Oluwaseun, "
+    "Yetunde, Adebayo, Folake, Ibrahim, Fatima, Aisha, Musa, Blessing, "
+    "Chinedu, Amara, Ifeoma, Tunde, Kemi, Uche. "
+    "Places: Lagos, Abuja, Ibadan, Port Harcourt, Kano, Enugu."
+)
 
 
 def _pcm16_to_wav(pcm_bytes: bytes, sample_rate: int) -> bytes:
