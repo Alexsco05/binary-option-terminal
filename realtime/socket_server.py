@@ -25,6 +25,8 @@ from realtime.registry import register_connection, unregister_connection
 from realtime.events import emit_state, DORMANT
 from services.rate_limit import is_rate_limited
 from storage import safe_device_id
+from core.intent import resolve_permission_response
+from core.workspace_actions import handle_workspace_action
 
 # Handlers for each client -> server message type. Registered here so
 # new message types can be added by adding a function + one line in
@@ -44,10 +46,9 @@ def on_client_event(event_name):
 
 @on_client_event("permission.response")
 def _handle_permission_response(device_id, task_id, payload):
-    # Stubbed until the permission system (schema §6) is implemented —
-    # logged so you can see it arriving correctly during testing, not
-    # yet wired to anything that acts on the decision.
-    print(f"[Realtime] permission.response from {device_id}: {payload}")
+    # Phase 6 — permission flow (schema §6). See core/intent.py's
+    # resolve_permission_response() for what happens with this.
+    resolve_permission_response(device_id, payload)
 
 
 @on_client_event("voice.interrupt")
@@ -68,8 +69,11 @@ def _handle_task_cancel(device_id, task_id, payload):
 
 @on_client_event("workspace.action")
 def _handle_workspace_action(device_id, task_id, payload):
-    # Stubbed until workspaces (schema §5/§7/§7a) are implemented.
-    print(f"[Realtime] workspace.action from {device_id}: {payload}")
+    # Phase 6b — action registry resolution (schema §9/§11).
+    workspace = payload.get("workspace")
+    action    = payload.get("action")
+    params    = payload.get("params") or {}
+    handle_workspace_action(device_id, task_id, workspace, action, params)
 
 
 def register_socket_routes(app):
