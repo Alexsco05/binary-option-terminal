@@ -56,6 +56,7 @@ def emit_event(device_id: str, event: str, payload: dict, task_id: str = None) -
         "session_id": device_id,
         "task_id": task_id,
         "timestamp": _now_iso(),
+        "schema_version": 1,
         "payload": payload or {},
     }
 
