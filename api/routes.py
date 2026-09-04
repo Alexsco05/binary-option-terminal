@@ -41,7 +41,7 @@ from core.agent import (
 )
 
 from memory.conversation import (
-    CACHE, EXECUTOR, USER_SHORT_TERM, PENDING_CONFIRMATIONS,
+    CACHE, EXECUTOR, USER_SHORT_TERM, PENDING_CONFIRMATIONS, LAST_RESEARCH,
     get_short_term, trim_short_term,
 )
 from memory.personality import (
@@ -53,7 +53,7 @@ from memory.knowledge import merge_nodes, _get_knowledge
 from skills.research import run_research
 from integrations.web import web_search, firecrawl_read, get_weather, get_news, extract_city_from_weather_query
 from integrations.providers import _call_groq_raw_extended
-from integrations.tts import generate_tts_base64
+from integrations.tts import generate_tts_base64, transcribe_pcm16
 
 from realtime.events import new_task_id
 from realtime.tasks import emit_task_started, emit_task_completed, emit_task_failed
@@ -411,6 +411,10 @@ def register_routes(app):
                 title="Research",
                 data={"title": "Research", "subtitle": topic, "blocks": blocks},
             )
+            LAST_RESEARCH[device_id] = {
+                "task_id": task_id, "topic": topic,
+                "summary": result["summary"], "sources": result.get("sources", []),
+            }
             emit_task_completed(device_id, task_id, summary="Research complete",
                                 result={"topic": topic, "source_count": len(result.get("sources", []))})
         else:
@@ -947,6 +951,35 @@ def register_routes(app):
         if not audio:
             return jsonify({"error": error or "TTS unavailable"}), 500
         return jsonify({"audio": audio, "format": "mp3"})
+
+    @app.route("/transcribe", methods=["POST"])
+    def transcribe():
+        # Schema §13 — raw PCM16 bytes in, {"transcript": "..."} out.
+        # Deliberately NOT wrapped in the WebSocket event system: this
+        # is optional and non-blocking by design (the client already
+        # has a working local transcript via Vosk the instant speech
+        # ends, and only waits a short fixed timeout for this before
+        # using that instead), so a slow or failed response here should
+        # never hold up or break a voice conversation — same reasoning
+        # as why it's a plain HTTP endpoint like /tts rather than
+        # routed through /ws at all.
+        device_id    = safe_device_id(request.headers.get("X-Device-Id", "default"))
+        sample_rate  = request.args.get("sample_rate", 16000, type=int)
+        audio_format = request.args.get("format", "pcm16")
+
+        if is_rate_limited(device_id):
+            return jsonify({"error": "Rate limited"}), 429
+        if audio_format != "pcm16":
+            return jsonify({"error": f"Unsupported format '{audio_format}', expected pcm16"}), 400
+
+        audio_bytes = request.get_data()
+        if not audio_bytes:
+            return jsonify({"error": "No audio data received"}), 400
+
+        transcript, error = transcribe_pcm16(audio_bytes, sample_rate)
+        if error and not transcript:
+            return jsonify({"error": error}), 502
+        return jsonify({"transcript": transcript})
 
     @app.route("/health", methods=["GET"])
     def health():
