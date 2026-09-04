@@ -24,6 +24,15 @@ EXECUTOR = ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
 CACHE                 = TTLCache(maxsize=CACHE_MAXSIZE, ttl=CACHE_TTL_SECONDS)
 USER_SHORT_TERM       = {}
 PENDING_CONFIRMATIONS = {}
+# Phase 6b — workspace.action resolution (schema §9/§11). The server
+# doesn't otherwise remember anything about a finished /research task
+# once its HTTP response is sent — but a later "summarize"/"citations"/
+# "compare" tap on the research workspace arrives asynchronously, with
+# no request in flight, and needs the actual topic/summary/sources to
+# act on. One most-recent result per device, not a history — a second
+# research task simply replaces the first, same as the workspace
+# itself only ever shows one at a time on screen.
+LAST_RESEARCH = {}
 
 
 def get_short_term(device_id: str):
