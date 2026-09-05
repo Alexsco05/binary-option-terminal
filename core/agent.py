@@ -157,7 +157,8 @@ from core.formatting import sanitize_formatting
 from realtime.events import emit_state, THINKING, DORMANT, new_task_id
 from realtime.tasks import (
     emit_task_started, emit_task_planning, emit_task_progress,
-    emit_task_completed, workspace_for_route,
+    emit_task_completed, emit_task_failed, workspace_for_route,
+    is_task_cancelled, clear_task_cancel,
 )
 from realtime.tools import emit_skill_started, run_tool
 from realtime.workspace import (
@@ -344,6 +345,25 @@ def process_multi_step(msg: str, device_id: str):
         )
 
     for step_index, step in enumerate(steps, start=1):
+        # Phase 8b — real task.cancel handling (schema §9). Checked
+        # between steps, not mid-step — a step already calling a model
+        # provider runs to completion; cancellation takes effect before
+        # the NEXT one starts. This is deliberately coarse: the
+        # alternative (interrupting a step's own in-flight HTTP call to
+        # the model provider) needs plumbing call_provider() itself
+        # doesn't have, for a case that's already rare (multi-part
+        # requests) inside an already-rare case (someone cancels mid-
+        # task). Not worth that complexity for the gain over "cancels
+        # within one step's latency instead of instantly."
+        if is_task_cancelled(task_id):
+            clear_task_cancel(task_id)
+            emit_task_failed(device_id, task_id, error="cancelled",
+                             message="Task cancelled by user.", recoverable=False)
+            emit_state(device_id, DORMANT)
+            partial = " ".join(a.strip() for a in answers if a and a.strip())
+            reply = (partial + " (Stopped there.)") if partial else "Okay, I stopped that."
+            return reply, None
+
         route         = route_model(step, personality)
         system_prompt = build_system_prompt(personality, route)
         model_cfg     = MODELS.get(route, MODELS["fast"])
@@ -392,6 +412,7 @@ def process_multi_step(msg: str, device_id: str):
 
     emit_task_completed(device_id, task_id, summary="Task complete")
     emit_state(device_id, DORMANT)
+    clear_task_cancel(task_id)
 
     return combined, action_trigger
 
