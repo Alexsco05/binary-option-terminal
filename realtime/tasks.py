@@ -16,7 +16,44 @@
 # place.
 # ================================================================
 
-from realtime.events import emit_event, new_task_id
+import threading
+
+from realtime.events import emit_event
+
+# ================================================================
+# Task cancellation (schema §9's task.cancel). A real cross-thread
+# concern, not just bookkeeping: task.cancel arrives on the
+# WebSocket's own thread, while the multi-step task it targets is
+# running synchronously inside a completely separate /stream (or
+# /run) HTTP request thread. A plain set + lock is enough here — this
+# doesn't need to survive a restart, only to be visible the instant
+# it's set from the other thread. Entries are removed once consumed
+# (see process_multi_step()) so this can't grow unbounded from
+# finished tasks whose ids are never revisited.
+# ================================================================
+_CANCELLED_TASKS = set()
+_CANCEL_LOCK = threading.Lock()
+
+
+def request_task_cancel(task_id) -> None:
+    if not task_id:
+        return
+    with _CANCEL_LOCK:
+        _CANCELLED_TASKS.add(task_id)
+
+
+def is_task_cancelled(task_id) -> bool:
+    if not task_id:
+        return False
+    with _CANCEL_LOCK:
+        return task_id in _CANCELLED_TASKS
+
+
+def clear_task_cancel(task_id) -> None:
+    if not task_id:
+        return
+    with _CANCEL_LOCK:
+        _CANCELLED_TASKS.discard(task_id)
 
 # Not every route has an obvious workspace equivalent — routes like
 # "fast", "complex", "creative", "empathetic", "firm", "weather",
