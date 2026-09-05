@@ -55,7 +55,7 @@ from integrations.web import web_search, firecrawl_read, get_weather, get_news, 
 from integrations.providers import _call_groq_raw_extended
 from integrations.tts import generate_tts_base64, transcribe_pcm16
 
-from realtime.events import new_task_id
+from realtime.events import new_task_id, emit_state, THINKING, DORMANT
 from realtime.tasks import emit_task_started, emit_task_completed, emit_task_failed
 from realtime.workspace import (
     emit_workspace_open, heading_block, body_block, source_list_block,
@@ -252,6 +252,17 @@ def register_routes(app):
             device_id, [{"role": "system", "content": ""}]
         )
 
+        # Phase 8 — this was a real gap, not a stylistic one: process()
+        # (/run) already emits THINKING/DORMANT around every reply, but
+        # /stream's ordinary single-shot branch (below) called
+        # _stream_groq() directly and never touched the orb at all. Since
+        # the real app only ever calls /stream (see GIDEON_WS_RECONNECT_
+        # NEEDED.md's findings), that meant the orb never moved from a
+        # server push during a normal conversation turn — only for the
+        # rare multi-part case above. This puts every /stream reply on
+        # the same footing as /run.
+        emit_state(device_id, THINKING, "Thinking...")
+
         # route and build system prompt
         route        = route_model(msg, personality)
         system_prompt = build_system_prompt(personality, route)
@@ -278,9 +289,27 @@ def register_routes(app):
 
         # only Groq supports streaming in current stack
         if provider == "groq":
-            gen = _stream_groq(model_input, msg, model, system_prompt,
-                               short_term, device_id, route,
-                               fallback_chain=model_cfg.get("fallbacks"))
+            def _with_dormant_on_completion(inner_gen):
+                # DORMANT only on a reply that actually finished — NOT in
+                # a blanket try/finally, deliberately. On a barge-in, the
+                # client already gives itself instant local orb feedback
+                # (schema doc, §12's "built and tested" list) the moment
+                # it closes the connection, which is what raises
+                # GeneratorExit here. Pushing DORMANT on that path would
+                # race in behind whatever the client already set locally
+                # and could visibly flicker the orb backward.
+                try:
+                    for chunk in inner_gen:
+                        yield chunk
+                    emit_state(device_id, DORMANT)
+                except GeneratorExit:
+                    raise
+
+            gen = _with_dormant_on_completion(_stream_groq(
+                model_input, msg, model, system_prompt,
+                short_term, device_id, route,
+                fallback_chain=model_cfg.get("fallbacks"),
+            ))
         else:
             # non-Groq provider — no native token streaming, but still needs
             # the same search/read/action handling as everything else, or
@@ -345,6 +374,7 @@ def register_routes(app):
             trim_short_term(short_term)
             EXECUTOR.submit(update_long_term, msg, final, device_id)
             extract_facts(msg, device_id)
+            emit_state(device_id, DORMANT)
 
             def wrapped():
                 chunks = list(_split_into_sentence_chunks(final))
