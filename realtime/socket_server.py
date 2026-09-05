@@ -25,6 +25,7 @@ from realtime.registry import register_connection, unregister_connection
 from realtime.events import emit_state, DORMANT
 from services.rate_limit import is_rate_limited
 from storage import safe_device_id
+from realtime.tasks import request_task_cancel
 from core.intent import resolve_permission_response
 from core.workspace_actions import handle_workspace_action
 
@@ -62,9 +63,17 @@ def _handle_voice_interrupt(device_id, task_id, payload):
 
 @on_client_event("task.cancel")
 def _handle_task_cancel(device_id, task_id, payload):
-    # Stubbed until task lifecycle tracking (schema §3) exists — there
-    # is no running task object yet for this to cancel.
-    print(f"[Realtime] task.cancel from {device_id} for task {task_id}")
+    # Phase 8b — real cancellation (schema §9). The schema's inline
+    # example shows task.cancel carrying { "task_id": "..." } — that
+    # could mean the envelope's own task_id field (used everywhere
+    # else) or a nested payload field. Accepting either costs nothing
+    # and can't behave wrong either way.
+    target = task_id or payload.get("task_id")
+    if not target:
+        print(f"[Realtime] task.cancel from {device_id} with no task_id, ignoring")
+        return
+    request_task_cancel(target)
+    print(f"[Realtime] task.cancel from {device_id} for task {target} — flagged")
 
 
 @on_client_event("workspace.action")
