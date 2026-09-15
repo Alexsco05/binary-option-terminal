@@ -85,18 +85,40 @@ def call_with_tools(msg: str, system_prompt: str, short_term: list,
                 args = {}
 
             tool = get_tool(name)
+            success, recoverable = True, False
             if tool is None:
                 result_text = f"Unknown tool '{name}'."
+                success, recoverable = False, False  # not fixable by retrying
             else:
                 try:
                     result = tool.function(**args)
                     result_text = result if tool.result_is_text else json.dumps(result)
+                    if not result_text:
+                        # A tool returning empty/None isn't an exception,
+                        # but it's still a failure the model should know
+                        # is worth trying differently (e.g. a different
+                        # search query), not treat as a real answer.
+                        result_text = f"'{name}' returned nothing useful."
+                        success, recoverable = False, True
+                except TypeError as e:
+                    # Wrong/missing arguments — the model's own JSON
+                    # didn't match the tool's schema. Recoverable: it
+                    # can just re-call with corrected arguments.
+                    result_text = f"Tool '{name}' got invalid arguments: {e}"
+                    success, recoverable = False, True
                 except Exception as e:
+                    # Anything else (network error, page unreachable,
+                    # etc.) — same category, worth letting the model try
+                    # again or try a different approach rather than
+                    # treating this turn as a dead end.
                     result_text = f"Tool '{name}' failed: {e}"
-                calls_log.append({
-                    "name": name, "args": args,
-                    "result_preview": (result_text or "")[:200],
-                })
+                    success, recoverable = False, True
+
+            calls_log.append({
+                "name": name, "args": args, "success": success,
+                "recoverable": recoverable,
+                "result_preview": (result_text or "")[:200],
+            })
 
             messages.append({
                 "role": "tool",
