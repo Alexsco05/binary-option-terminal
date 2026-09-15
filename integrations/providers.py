@@ -22,7 +22,7 @@ from config.environment import (
     GROQ_KEYS, OPENROUTER_KEYS, GEMINI_KEY,
     COHERE_KEY, CEREBRAS_KEY, MISTRAL_KEYS,
 )
-from integrations.client import SESSION
+from integrations.client import post_with_retry
 
 
 # ── GROQ ──────────────────────────────────────────────────────────
@@ -32,7 +32,7 @@ def _call_groq_raw(prompt: str):
         if not key:
             continue
         try:
-            r = SESSION.post(
+            r = post_with_retry(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
                 json={"model": "openai/gpt-oss-120b",
@@ -57,7 +57,7 @@ def _call_groq_raw_extended(prompt: str, max_tokens: int = 1200):
         if not key:
             continue
         try:
-            r = SESSION.post(
+            r = post_with_retry(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
                 json={"model": "openai/gpt-oss-120b",
@@ -73,38 +73,44 @@ def _call_groq_raw_extended(prompt: str, max_tokens: int = 1200):
     return None
 
 
-def _call_groq(msg: str, model: str, system_prompt: str, short_term: list, retries: int = 2):
+def _call_groq(msg: str, model: str, system_prompt: str, short_term: list):
+    """
+    The `retries` parameter that used to live here is gone —
+    post_with_retry() (integrations/client.py) now owns retry-with-
+    backoff for transient failures (timeouts, connection errors,
+    5xx), replacing the manual for-attempt-in-range loop and
+    time.sleep() calls that used to be here. Confirmed no caller ever
+    passed retries= explicitly, so this is a safe removal, not a
+    silent behavior change for anyone.
+
+    A 429 rate limit is a 4xx, so post_with_retry correctly does NOT
+    retry it — same effective outcome as the old "break out of the
+    retry loop if the error mentions rate_limit" check, just decided
+    by the actual HTTP status code instead of string-matching the
+    error body, so it also catches a rate limit Groq reports some
+    other way than the exact phrase that check was looking for.
+    """
     is_complex = len(msg.split()) > 8
     for key in GROQ_KEYS:
         if not key:
             continue
-        for attempt in range(retries):
-            try:
-                messages = list(short_term)
-                messages[0] = {"role": "system", "content": system_prompt}
-                messages.append({"role": "user", "content": msg})
-                r = SESSION.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {key}"},
-                    json={"model": model, "messages": messages,
-                          "max_tokens": 1500 if is_complex else 800},
-                    timeout=18,
-                )
-                d = r.json()
-                if "choices" in d:
-                    return d["choices"][0]["message"]["content"]
-                err = d.get("error", {})
-                print(f"[Groq {model}] failed: {err}")
-                if "rate_limit" in str(err).lower():
-                    break
-            except requests.Timeout:
-                print(f"[Groq {model}] timeout attempt {attempt}")
-                if attempt < retries - 1:
-                    time.sleep(0.5)
-            except Exception as e:
-                print(f"[Groq {model}] attempt {attempt}: {e}")
-                if attempt < retries - 1:
-                    time.sleep(0.5)
+        try:
+            messages = list(short_term)
+            messages[0] = {"role": "system", "content": system_prompt}
+            messages.append({"role": "user", "content": msg})
+            r = post_with_retry(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={"model": model, "messages": messages,
+                      "max_tokens": 1500 if is_complex else 800},
+                timeout=18,
+            )
+            d = r.json()
+            if "choices" in d:
+                return d["choices"][0]["message"]["content"]
+            print(f"[Groq {model}] failed: {d.get('error', {})}")
+        except Exception as e:
+            print(f"[Groq {model}] {e}")
     return None
 
 
@@ -137,7 +143,7 @@ def _call_openrouter(msg: str, model: str, system_prompt: str, short_term: list)
                          "openai/gpt-oss-120b:free"):
                 if extra not in candidates:
                     candidates.append(extra)
-            r = SESSION.post(
+            r = post_with_retry(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}",
                          "HTTP-Referer": "https://gideon-app.com",
@@ -171,7 +177,7 @@ def _call_gemini(msg: str, model: str, system_prompt: str, short_term: list):
             history_text += f"{role}: {m['content']}\n"
 
         full_prompt = f"{system_prompt}\n\n{history_text}User: {msg}"
-        r = SESSION.post(
+        r = post_with_retry(
             f"https://generativelanguage.googleapis.com/v1beta/models/"
             f"{model}:generateContent?key={GEMINI_KEY}",
             json={"contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
@@ -200,7 +206,7 @@ def _call_cohere(msg: str, system_prompt: str, short_term: list):
                 "role": "USER" if m["role"] == "user" else "CHATBOT",
                 "message": m["content"],
             })
-        r = SESSION.post(
+        r = post_with_retry(
             "https://api.cohere.ai/v1/chat",
             headers={"Authorization": f"Bearer {COHERE_KEY}"},
             json={"message": msg, "preamble": system_prompt,
@@ -229,7 +235,7 @@ def _call_cerebras(msg: str, model: str, system_prompt: str, short_term: list):
         messages = list(short_term)
         messages[0] = {"role": "system", "content": system_prompt}
         messages.append({"role": "user", "content": msg})
-        r = SESSION.post(
+        r = post_with_retry(
             "https://api.cerebras.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {CEREBRAS_KEY}"},
             json={"model": model, "messages": messages,
@@ -255,7 +261,7 @@ def _call_mistral(msg: str, system_prompt: str, short_term: list):
             messages = list(short_term)
             messages[0] = {"role": "system", "content": system_prompt}
             messages.append({"role": "user", "content": msg})
-            r = SESSION.post(
+            r = post_with_retry(
                 "https://api.mistral.ai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
                 json={"model": "mistral-small-latest", "messages": messages,
