@@ -26,7 +26,7 @@
 import json
 
 from config.environment import GROQ_KEYS
-from integrations.client import SESSION
+from integrations.client import post_with_retry
 from core.tool_registry import get_tool, list_tool_schemas
 
 
@@ -111,12 +111,16 @@ def call_with_tools(msg: str, system_prompt: str, short_term: list,
 
 def _call_groq_with_tools(messages: list, tools: list, model: str):
     """Returns the raw assistant message dict ({"content", "tool_calls"})
-    from the first key that succeeds, or None if every key failed."""
+    from the first key that succeeds, or None if every key failed.
+    post_with_retry() (integrations/client.py) adds 2 retries with
+    backoff on transient failures within each key's attempt — this
+    used to give up on a key after exactly one try, even for a plain
+    network blip that a second attempt would likely have survived."""
     for key in GROQ_KEYS:
         if not key:
             continue
         try:
-            r = SESSION.post(
+            r = post_with_retry(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
                 json={
@@ -135,4 +139,3 @@ def _call_groq_with_tools(messages: list, tools: list, model: str):
         except Exception as e:
             print(f"[ToolRouter] {e}")
     return None
-
