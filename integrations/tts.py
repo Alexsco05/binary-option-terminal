@@ -12,12 +12,13 @@
 
 import os
 import re
+import time
 import base64
 import asyncio
 import uuid as _uuid
 
 from config.environment import OPENAI_KEY, GROQ_KEYS
-from integrations.client import SESSION
+from integrations.client import SESSION, post_with_retry
 from core.tags import extract_action_trigger
 from skills.mathematics import convert_math_for_speech
 
@@ -201,12 +202,27 @@ def transcribe_pcm16(audio_bytes: bytes, sample_rate: int = 16000) -> tuple:
         return "", "No audio data received"
 
     wav_bytes = _pcm16_to_wav(audio_bytes, sample_rate)
+    audio_seconds = len(audio_bytes) / (sample_rate * 2)  # 2 bytes/sample, mono PCM16
 
     for key in GROQ_KEYS:
         if not key:
             continue
+        started = time.monotonic()
         try:
-            r = SESSION.post(
+            # post_with_retry(), not SESSION.post() directly — this was
+            # a real, previously-undiscovered bug: SESSION has a
+            # hardcoded "Content-Type: application/json" default
+            # (integrations/client.py), and requests only auto-computes
+            # the correct multipart boundary header when Content-Type
+            # ISN'T already present. Every multipart request here was
+            # therefore sent with an incorrect Content-Type the whole
+            # time, which Groq's API cannot parse as a file upload.
+            # Confirmed directly against the real requests library, not
+            # just mocks. post_with_retry() explicitly unsets
+            # Content-Type for any request with files=..., letting
+            # requests compute the real one, and adds 2 retries with
+            # backoff on transient failures on top.
+            r = post_with_retry(
                 "https://api.groq.com/openai/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {key}"},
                 files={"file": ("audio.wav", wav_bytes, "audio/wav")},
@@ -215,15 +231,31 @@ def transcribe_pcm16(audio_bytes: bytes, sample_rate: int = 16000) -> tuple:
                     "language": "en",
                     "prompt": _ACCENT_PROMPT_HINT,
                 },
-                timeout=8,
+                # Tightened from 8s. Groq's own published speed factor for
+                # this model is ~216x real-time — a typical few-second
+                # voice command is tens of milliseconds of actual compute.
+                # 8s was giving a slow/bad key far too long before falling
+                # through to the next one (or to the client's own 1200ms
+                # bound already having given up). 5s still gives a
+                # legitimately slow network path real room without
+                # needlessly blocking that long on a key that's just bad.
+                # Retries (see post_with_retry) apply within this budget,
+                # not on top of it — tenacity's own wait time is separate
+                # from this per-attempt socket timeout.
+                timeout=5,
             )
+            elapsed_ms = int((time.monotonic() - started) * 1000)
             if r.status_code == 200:
                 text = r.json().get("text", "").strip()
+                print(f"[Transcribe][Groq] OK in {elapsed_ms}ms "
+                      f"({audio_seconds:.1f}s audio)")
                 return text, ""
             else:
-                print(f"[Transcribe][Groq] {r.status_code}: {r.text[:200]}")
+                print(f"[Transcribe][Groq] {r.status_code} after {elapsed_ms}ms: "
+                      f"{r.text[:200]}")
         except Exception as e:
-            print(f"[Transcribe][Groq] {e}")
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            print(f"[Transcribe][Groq] failed after {elapsed_ms}ms: {e}")
 
     return "", "All transcription providers failed"
 
