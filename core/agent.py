@@ -26,6 +26,8 @@
 import re
 import json
 import requests
+from integrations.client import post_with_retry
+from concurrent.futures import as_completed
 
 from config.environment import GROQ_KEYS
 from config.settings import MODELS
@@ -231,38 +233,84 @@ def _looks_multi_part(msg: str) -> bool:
     return msg.count("?") > 1 or any(m in ml for m in markers)
 
 
-def plan_steps(msg: str, device_id: str) -> list:
+def plan_steps(msg: str, device_id: str) -> tuple:
     """
-    Asks the model to break a request into an ordered list of
-    self-contained steps, ONLY called after _looks_multi_part already
-    said yes. Always returns a usable list: on any failure (call
-    fails, bad JSON, empty result) it returns [msg] unchanged, which
-    the caller treats as "not actually multi-part" and falls through
-    to the normal single-shot path. Capped at 5 steps as a sanity
-    limit against a runaway plan.
+    Returns (steps: list[str], parallel: bool). ONLY called after
+    _looks_multi_part already said yes. Always returns a usable list:
+    on any failure (call fails, bad JSON, empty result) it returns
+    ([msg], False), which the caller treats as "not actually multi-
+    part" and falls through to the normal single-shot path. Capped at
+    5 steps as a sanity limit against a runaway plan.
+
+    parallel=True means the model judged every step to be fully
+    independent — no step's answer depends on reading another step's
+    actual result (e.g. "check the weather AND tell me a joke"). This
+    only changes HOW process_multi_step() executes the steps
+    (concurrently vs one after another) — it never changes what any
+    individual step's answer is, since an independent step produces
+    the same answer either way. Defaults to False (sequential, the
+    original and more heavily tested path) on any parsing failure or
+    if the model omits the field — same conservative-fallback
+    philosophy as steps defaulting to [msg].
     """
     prompt = (
         "Break this request into an ordered list of separate, "
         "self-contained steps, only if it genuinely has multiple "
         "distinct parts. Each step should be answerable on its own, "
-        "with enough context to stand alone. Return ONLY valid JSON: "
-        '{"steps": ["step one", "step two"]}. '
-        'If this is really just one request, return {"steps": ["<the original request>"]}.\n\n'
+        "with enough context to stand alone. Also decide: can these "
+        "steps be done in any order, completely independently of each "
+        "other (parallel=true), or does a later step depend on an "
+        "earlier step's actual result — e.g. \"research X, then use "
+        "that to plan Y\" (parallel=false)? "
+        "Return ONLY valid JSON: "
+        '{"steps": ["step one", "step two"], "parallel": true}. '
+        'If this is really just one request, return '
+        '{"steps": ["<the original request>"], "parallel": false}.\n\n'
         f"Request: {msg}"
     )
     raw = _call_groq_raw_extended(prompt, max_tokens=400)
     if not raw:
-        return [msg]
+        return [msg], False
     clean = raw.strip().replace("```json", "").replace("```", "").strip()
     s, e = clean.find("{"), clean.rfind("}") + 1
     if s < 0 or e <= 0:
-        return [msg]
+        return [msg], False
     parsed = _safe_json_loads(clean[s:e])
     steps = parsed.get("steps") if parsed else None
     if not steps or not isinstance(steps, list):
-        return [msg]
+        return [msg], False
     steps = [str(s).strip() for s in steps if str(s).strip()]
-    return steps[:5] if steps else [msg]
+    if not steps:
+        return [msg], False
+    parallel = bool(parsed.get("parallel", False)) if isinstance(parsed, dict) else False
+    return steps[:5], parallel
+
+
+def _execute_step(step: str, personality: dict, short_term: list, device_id: str) -> tuple:
+    """
+    Routes, calls the model (with its fallback chain), and cleans one
+    step's answer. Shared by both the sequential and parallel branches
+    of process_multi_step() below — extracted so there is exactly one
+    place this logic lives, not two copies that could quietly drift
+    apart from each other over time.
+    """
+    route         = route_model(step, personality)
+    system_prompt = build_system_prompt(personality, route)
+    model_cfg     = MODELS.get(route, MODELS["fast"])
+    primary       = select_primary(model_cfg)
+
+    answer = call_provider(step, primary["provider"], primary["model"],
+                           system_prompt, short_term, device_id)
+    if not answer:
+        for fb in model_cfg.get("fallbacks", []):
+            answer = call_provider(step, fb["provider"], fb["model"],
+                                   system_prompt, short_term, device_id)
+            if answer:
+                break
+
+    clean, action = extract_action_trigger(answer or "I couldn't complete that part.")
+    clean = _clean_for_route(clean, route)
+    return clean, action
 
 
 def process_multi_step(msg: str, device_id: str):
@@ -287,11 +335,12 @@ def process_multi_step(msg: str, device_id: str):
     if not _looks_multi_part(msg):
         return None
 
-    steps = plan_steps(msg, device_id)
+    steps, parallel = plan_steps(msg, device_id)
     if len(steps) <= 1:
         return None
 
-    print(f"[Planner] '{msg[:60]}' -> {len(steps)} step(s): {steps}")
+    print(f"[Planner] '{msg[:60]}' -> {len(steps)} step(s), "
+          f"parallel={parallel}: {steps}")
 
     # Task lifecycle events (schema §3) — this is the one place in the
     # backend that has genuine multi-step structure to report. A
@@ -344,55 +393,92 @@ def process_multi_step(msg: str, device_id: str):
             },
         )
 
-    for step_index, step in enumerate(steps, start=1):
-        # Phase 8b — real task.cancel handling (schema §9). Checked
-        # between steps, not mid-step — a step already calling a model
-        # provider runs to completion; cancellation takes effect before
-        # the NEXT one starts. This is deliberately coarse: the
-        # alternative (interrupting a step's own in-flight HTTP call to
-        # the model provider) needs plumbing call_provider() itself
-        # doesn't have, for a case that's already rare (multi-part
-        # requests) inside an already-rare case (someone cancels mid-
-        # task). Not worth that complexity for the gain over "cancels
-        # within one step's latency instead of instantly."
+    # Task Planner upgrade (roadmap Phase 1) — steps the model judged
+    # fully independent run concurrently instead of one after another,
+    # cutting total latency to roughly the slowest single step instead
+    # of the sum of all of them. Correctness is identical either way:
+    # an independent step's answer doesn't change based on what order
+    # it ran in. Cancellation is checked once before dispatching the
+    # whole batch, not between individual steps — once several HTTP
+    # calls are already in flight together, there's no per-step
+    # boundary left to check at, so this is the parallel-path
+    # equivalent of the sequential path's own "between steps, not
+    # mid-step" compromise above.
+    if parallel and step_total > 1:
         if is_task_cancelled(task_id):
             clear_task_cancel(task_id)
             emit_task_failed(device_id, task_id, error="cancelled",
                              message="Task cancelled by user.", recoverable=False)
             emit_state(device_id, DORMANT)
-            partial = " ".join(a.strip() for a in answers if a and a.strip())
-            reply = (partial + " (Stopped there.)") if partial else "Okay, I stopped that."
-            return reply, None
+            return "Okay, I stopped that.", None
 
-        route         = route_model(step, personality)
-        system_prompt = build_system_prompt(personality, route)
-        model_cfg     = MODELS.get(route, MODELS["fast"])
-        primary       = select_primary(model_cfg)
+        emit_state(device_id, THINKING, "Working on it...")
+        results  = [None] * step_total
+        futures  = {
+            EXECUTOR.submit(_execute_step, step, personality, short_term, device_id): i
+            for i, step in enumerate(steps)
+        }
+        completed = 0
+        # Progress is reported in COMPLETION order (whichever step
+        # finishes first genuinely did finish first) — but the final
+        # combined answer and action_trigger selection below use
+        # ORIGINAL step order instead, so the reply reads coherently
+        # and which action wins is deterministic regardless of which
+        # network call happened to come back first.
+        for future in as_completed(futures):
+            i = futures[future]
+            try:
+                results[i] = future.result()
+            except Exception as e:
+                results[i] = (f"I couldn't complete that part: {e}", None)
+            completed += 1
+            emit_task_progress(device_id, task_id, completed, step_total, steps[i][:100])
+            if workspace:
+                percent = int(round((completed / step_total) * 100))
+                emit_workspace_update(device_id, task_id, {
+                    "blocks": [progress_block(steps[i][:100], percent)]
+                })
 
-        emit_task_progress(device_id, task_id, step_index, step_total, step[:100])
-        emit_state(device_id, THINKING, step[:100])
+        for clean, action in results:
+            answers.append(clean)
+            if action and not action_trigger:
+                action_trigger = action
 
-        if workspace:
-            percent = int(round((step_index / step_total) * 100)) if step_total else 0
-            emit_workspace_update(device_id, task_id, {
-                "blocks": [progress_block(step[:100], percent)]
-            })
+    else:
+        for step_index, step in enumerate(steps, start=1):
+            # Phase 8b — real task.cancel handling (schema §9). Checked
+            # between steps, not mid-step — a step already calling a
+            # model provider runs to completion; cancellation takes
+            # effect before the NEXT one starts. This is deliberately
+            # coarse: the alternative (interrupting a step's own
+            # in-flight HTTP call to the model provider) needs plumbing
+            # call_provider() itself doesn't have, for a case that's
+            # already rare (multi-part requests) inside an already-rare
+            # case (someone cancels mid-task). Not worth that
+            # complexity for the gain over "cancels within one step's
+            # latency instead of instantly."
+            if is_task_cancelled(task_id):
+                clear_task_cancel(task_id)
+                emit_task_failed(device_id, task_id, error="cancelled",
+                                 message="Task cancelled by user.", recoverable=False)
+                emit_state(device_id, DORMANT)
+                partial = " ".join(a.strip() for a in answers if a and a.strip())
+                reply = (partial + " (Stopped there.)") if partial else "Okay, I stopped that."
+                return reply, None
 
-        answer = call_provider(step, primary["provider"],
-                               primary["model"], system_prompt,
-                               short_term, device_id)
-        if not answer:
-            for fb in model_cfg.get("fallbacks", []):
-                answer = call_provider(step, fb["provider"], fb["model"],
-                                       system_prompt, short_term, device_id)
-                if answer:
-                    break
+            emit_task_progress(device_id, task_id, step_index, step_total, step[:100])
+            emit_state(device_id, THINKING, step[:100])
 
-        clean, action = extract_action_trigger(answer or "I couldn't complete that part.")
-        clean = _clean_for_route(clean, route)
-        answers.append(clean)
-        if action and not action_trigger:
-            action_trigger = action  # only the first step's action reaches the phone
+            if workspace:
+                percent = int(round((step_index / step_total) * 100)) if step_total else 0
+                emit_workspace_update(device_id, task_id, {
+                    "blocks": [progress_block(step[:100], percent)]
+                })
+
+            clean, action = _execute_step(step, personality, short_term, device_id)
+            answers.append(clean)
+            if action and not action_trigger:
+                action_trigger = action  # only the first step's action reaches the phone
 
     combined = " ".join(a.strip() for a in answers if a and a.strip())
 
@@ -657,7 +743,20 @@ def _stream_groq(model_input: str, msg: str, model: str, system_prompt: str,
             continue
         try:
             record_provider_usage("groq")
-            r = requests.post(
+            # post_with_retry() (integrations/client.py) wraps ONLY this
+            # connection-opening call, not the whole generator. That's
+            # deliberate, not an oversight: with stream=True, the status
+            # code is available the instant headers arrive, before the
+            # body/stream is ever touched — so a retry here happens
+            # entirely before a single byte has reached the client.
+            # Retrying anything AFTER r.iter_lines() starts below would
+            # mean either replaying sentences the user already heard, or
+            # needing resume logic that doesn't exist — tenacity's
+            # "retry the whole function" model doesn't fit a generator
+            # that's already yielded live output, so this stays narrow
+            # on purpose. The GeneratorExit/barge-in handling right
+            # below is completely unchanged.
+            r = post_with_retry(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
                 json={
