@@ -25,7 +25,7 @@
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
-from skills.verification import verify_math_reply
+from skills.verification import verify_math_or_calculus_reply
 
 
 @dataclass
@@ -150,10 +150,11 @@ register_skill(Skill(
         "the actual equation inside the $$ block."
     ),
     # The one skill with a real, independent check right now — see
-    # skills/verification.py. This is what a skill with verification
+    # skills/verification.py. Covers both plain arithmetic and, as of
+    # this update, derivatives. This is what a skill with verification
     # actually looks like: nothing outside this file and
     # verification.py itself needs to know math is special.
-    verify=verify_math_reply,
+    verify=verify_math_or_calculus_reply,
 ))
 
 register_skill(Skill(
