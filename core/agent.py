@@ -687,9 +687,14 @@ def process(msg: str, device_id: str):
         check = skill.verify(msg, clean)
         if check.get("attempted") and check.get("verified") is False:
             print(f"[Verification] Mismatch on '{msg[:60]}': {check['note']}")
+            # expected is a float for arithmetic, a string for calculus
+            # (a sympy expression like "2*x + 3") — :g only works on a
+            # number, so this can't use one format spec for both.
+            expected = check["expected"]
+            expected_str = f"{expected:g}" if isinstance(expected, (int, float)) else str(expected)
             clean += (
-                f"\n\n*(Double-checking that arithmetic independently, "
-                f"I get {check['expected']:g} — worth a second look.)*"
+                f"\n\n*(Double-checking that independently, "
+                f"I get {expected_str} — worth a second look.)*"
             )
 
     # only cache informational replies — never cache anything carrying
