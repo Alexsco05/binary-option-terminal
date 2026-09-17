@@ -175,3 +175,221 @@ def verify_math_reply(user_msg: str, model_reply: str, tolerance: float = 0.01):
 
     return {"attempted": True, "verified": verified,
             "expected": expected, "found": found, "note": note}
+
+
+# ================================================================
+# SYMBOLIC VERIFICATION (sympy) — derivatives
+# ----------------------------------------------------------------
+# The arithmetic checker above is deliberately scoped to plain numeric
+# expressions — it says so in the module docstring: calculus needs a
+# real CAS. This is that CAS, added now, kept separate from the
+# arithmetic path above rather than merged into it — arithmetic stays
+# fast and dependency-free for the common case, sympy only loads for
+# what actually needs it.
+#
+# Scoped tightly to derivatives for this first pass, same conservative
+# philosophy as everything above: silence (attempted=False) beats a
+# wrong guess on a pattern this doesn't confidently recognize.
+# Integrals, limits, and equation-solving are natural next additions
+# using the same shape, not built yet.
+#
+# SECURITY — read this before touching anything below.
+# sympy.parsing.sympy_parser.parse_expr DOES use eval() internally —
+# confirmed directly against sympy's own docstring ("this function
+# uses eval, and thus shouldn't be used on unsanitized input") and by
+# testing it: a plain empty global_dict is NOT enough. Passing
+# global_dict={} still let a real os.system() call execute, because
+# Python's eval() silently re-injects real builtins into any
+# namespace dict that doesn't already contain the key "__builtins__".
+# And even with "__builtins__": {} added to block that, a classic
+# Python sandbox-escape gadget chain — ().__class__.__bases__[0] — was
+# confirmed working directly against this parser, since restricting
+# globals alone doesn't stop pure attribute-access syntax that needs
+# no builtin at all.
+#
+# So this uses TWO independent layers, not one:
+#  1. _is_safe_math_string() — a strict character/pattern whitelist
+#     BEFORE the string ever reaches parse_expr. Rejects "__" (blocks
+#     every dunder-based gadget chain), "[" / "]" (blocks subscript/
+#     indexing, never needed for a calculus expression), and any "."
+#     that isn't a decimal point between two digits (blocks attribute
+#     access while still allowing "3.5"). What survives is restricted
+#     to letters/digits/+-*/^().,space only.
+#  2. A restricted global_dict (still no bare Python builtins) as a
+#     second layer, in case something to do with sympy's OWN token
+#     transformations ever introduces a path the whitelist didn't
+#     anticipate — defense in depth, not "the whitelist alone is
+#     trusted to be perfect forever."
+# ================================================================
+
+import sympy
+from sympy.parsing.sympy_parser import (
+    parse_expr, standard_transformations, implicit_multiplication_application,
+)
+
+_SYMPY_TRANSFORMATIONS = standard_transformations + (implicit_multiplication_application,)
+_X = sympy.Symbol("x")
+
+# Layer 2: everything a derivative answer legitimately needs, and
+# NOTHING else — no builtins, no import machinery.
+_SAFE_SYMPY_GLOBALS = {
+    "Symbol": sympy.Symbol, "Integer": sympy.Integer, "Float": sympy.Float,
+    "Rational": sympy.Rational, "pi": sympy.pi, "E": sympy.E, "I": sympy.I,
+    "oo": sympy.oo, "sin": sympy.sin, "cos": sympy.cos, "tan": sympy.tan,
+    "exp": sympy.exp, "log": sympy.log, "sqrt": sympy.sqrt,
+    "Abs": sympy.Abs, "factorial": sympy.factorial,
+    "__builtins__": {},
+}
+
+# Layer 1: the actual gate. Confirmed to block every gadget-chain
+# variant tested (dunder attribute access, subscript indexing) while
+# passing every legitimate calculus expression tested (polynomials,
+# trig, decimals, parentheses).
+_UNSAFE_CHAR_PATTERN = re.compile(r'[a-zA-Z0-9+\-*/^().,\s]*')
+
+
+def _is_safe_math_string(s: str) -> bool:
+    if not s or '__' in s or '[' in s or ']' in s:
+        return False
+    if re.search(r'\.(?!\d)|(?<!\d)\.', s):
+        return False
+    return bool(_UNSAFE_CHAR_PATTERN.fullmatch(s))
+
+
+def _latex_to_sympy_syntax(text: str) -> str:
+    """
+    Narrow LaTeX -> sympy-parseable string converter, scoped only to
+    what a calculus ANSWER typically looks like (polynomials, trig,
+    exp, simple fractions) — not a general LaTeX parser. sympy's own
+    parse_latex() needs the antlr4 runtime pinned to a specific old
+    version (confirmed: current antlr4-python3-runtime on PyPI is
+    already incompatible with it) — exactly the kind of fragile
+    dependency chain not worth adding just for this.
+    """
+    t = text
+    t = t.replace('\\left(', '(').replace('\\right)', ')')
+    t = t.replace('\\cdot', '*').replace('\\times', '*')
+    t = re.sub(r'\\frac\{([^{}]*)\}\{([^{}]*)\}', r'(\1)/(\2)', t)
+    for fn in ['sin', 'cos', 'tan', 'exp', 'log', 'ln', 'sqrt']:
+        t = t.replace(f'\\{fn}', fn)
+    t = t.replace('\\pi', 'pi')
+    t = t.replace('^', '**')
+    t = re.sub(r'\s+', '', t)
+    return t
+
+
+def _sympy_safe_parse(expr_str: str):
+    """Parses into a sympy expression, gated by the two layers
+    documented above. Returns None — same as any other rejection in
+    this file — for anything that fails the whitelist, not an
+    exception, so a hostile string degrades to "unverified" exactly
+    like a genuinely unparseable one does."""
+    if not expr_str or not _is_safe_math_string(expr_str):
+        return None
+    try:
+        return parse_expr(expr_str, transformations=_SYMPY_TRANSFORMATIONS,
+                          local_dict={"x": _X}, global_dict=_SAFE_SYMPY_GLOBALS)
+    except Exception:
+        return None
+
+
+_DERIVATIVE_PATTERN = re.compile(
+    r'(?:derivative of|differentiate|d/dx(?:\s*of)?)\s+([^,.\n?]+)',
+    re.IGNORECASE,
+)
+
+
+def extract_derivative_problem(msg: str):
+    """Pulls a differentiable expression out of a user message, only
+    for clearly-phrased requests ('derivative of x^2', 'differentiate
+    sin(x)', 'd/dx of 3x^2'). Returns None for anything else — a word
+    problem or an ambiguous phrasing stays unverified rather than
+    guessed at."""
+    m = _DERIVATIVE_PATTERN.search(msg)
+    if not m:
+        return None
+    raw = m.group(1).strip().rstrip('.').rstrip('?').strip()
+    return raw or None
+
+
+def _extract_final_expression(reply: str):
+    """
+    Pulls the model's claimed final answer out of its reply — the
+    last $$ ... $$ display block if one exists (the math pipeline's
+    own convention, see skills/mathematics.py), otherwise the last
+    inline $...$ span. Mirrors _extract_final_number's "last one is
+    the answer" philosophy for worked solutions that show intermediate
+    steps first.
+    """
+    blocks = re.findall(r'\$\$(.*?)\$\$', reply, re.DOTALL)
+    if blocks:
+        return blocks[-1].strip()
+    inline = re.findall(r'(?<!\$)\$([^\$\n]+)\$(?!\$)', reply)
+    if inline:
+        return inline[-1].strip()
+    return None
+
+
+def verify_derivative_reply(user_msg: str, model_reply: str):
+    """
+    Same return shape as verify_math_reply, for symbolic calculus:
+    {attempted, verified, expected, found, note}. expected/found are
+    stringified sympy expressions here, not floats. attempted=False
+    for anything this can't confidently parse — this should never
+    produce a false "wrong" on a problem it merely misunderstood.
+    """
+    problem = extract_derivative_problem(user_msg)
+    if not problem:
+        return {"attempted": False, "verified": None,
+                "expected": None, "found": None, "note": None}
+
+    expr = _sympy_safe_parse(_latex_to_sympy_syntax(problem))
+    if expr is None:
+        return {"attempted": False, "verified": None,
+                "expected": None, "found": None, "note": None}
+
+    try:
+        expected = sympy.simplify(sympy.diff(expr, _X))
+    except Exception:
+        return {"attempted": False, "verified": None,
+                "expected": None, "found": None, "note": None}
+
+    found_raw = _extract_final_expression(model_reply)
+    if found_raw is None:
+        return {"attempted": True, "verified": None,
+                "expected": str(expected), "found": None,
+                "note": "Could not find a clear final expression in the reply to check."}
+
+    found_expr = _sympy_safe_parse(_latex_to_sympy_syntax(found_raw))
+    if found_expr is None:
+        return {"attempted": True, "verified": None,
+                "expected": str(expected), "found": found_raw,
+                "note": "Could not parse the reply's claimed answer to verify it."}
+
+    try:
+        verified = sympy.simplify(expected - found_expr) == 0
+    except Exception:
+        verified = None
+
+    note = None
+    if verified is False:
+        note = (f"Independent check computed d/dx = {expected}, "
+                f"but the reply's final expression was {found_raw}.")
+
+    return {"attempted": True, "verified": verified,
+            "expected": str(expected), "found": found_raw, "note": note}
+
+
+def verify_math_or_calculus_reply(user_msg: str, model_reply: str):
+    """
+    Combined entry point registered on the math Skill (core/skills.py)
+    — tries the derivative checker first (more specific pattern, less
+    likely to false-match), falls back to the arithmetic checker.
+    Same {attempted, verified, expected, found, note} shape either
+    way, so the caller (core/agent.py) doesn't need to know or care
+    which one actually fired.
+    """
+    calc_result = verify_derivative_reply(user_msg, model_reply)
+    if calc_result["attempted"]:
+        return calc_result
+    return verify_math_reply(user_msg, model_reply)
